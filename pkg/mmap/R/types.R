@@ -36,7 +36,7 @@ as.Ctype.raw <- function(x) {
   else uchar(length(x))
 }
 as.Ctype.character <- function(x) {
-  char(nchar(x))
+  char(nchar(x[!is.na(x)], type = "bytes"))
 }
 as.Ctype.complex <- function(x) {
   if(length(x) == 1 && x==0)
@@ -49,11 +49,11 @@ as.Ctype.logical <- function(x) {
   else logi32(length(x))
 }
 
-char <- C_char <- function(length=0, nul=TRUE) {
-  if(length==0) { # a char byte
-    structure(raw(length), bytes=1L, signed=1L, class=c("Ctype","char"))
+char <- C_char <- function(length=NULL, nul=TRUE) {
+  if(is.null(length)) { # a char byte
+    structure(raw(0), bytes=1L, signed=1L, class=c("Ctype","char"))
   } else {
-    structure(character(length+ifelse(nul,1,0)), bytes=as.integer(length+ifelse(nul,1,0)), signed=0L,
+    structure(character(max(length,1)+!!nul), bytes=as.integer(max(length,1)+!!nul), signed=0L,
               nul=nul, class=c("Ctype","char"))
   }
 }
@@ -298,17 +298,3 @@ sizeof.default <- function(type) {
   else
     stop("unsupported type")
 }
-
-# convert non-fixed width strings to fw for mmap
-make.fixedwidth <- function(x, width=NA, justify=c("left","right")) {
-  if( !is.character(x))
-    stop("'x' must be a character vector")
-  if(is.na(width))
-    width <- max(nchar(x))
-  justify <- match.arg(justify)
-  if(justify=="left")
-    fmt <- "%-"
-  else fmt <- "%"
-  sprintf(paste(fmt,width,"s",sep=""), x)  # e.g. "%-9s"
-}
-

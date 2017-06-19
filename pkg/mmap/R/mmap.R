@@ -294,15 +294,32 @@ as.mmap.complex <- function(x,
 }
 
 as.mmap.character <- function(x, 
-                              mode=char(nchar(x[1])), 
+                              mode=char(max(nchar(x[!is.na(x)], type = "bytes"))),
                               file=tempmmap(), force=FALSE, ...) {
-  if( !all(nchar(x) == nchar(x[1]))) {
-    if(!force)
-      stop("requires fixed-width character vector. Use make.fixedwidth first.")
-    x <- make.fixedwidth(x)
+  payload.cap <- attr(mode, "bytes") - 1
+  nas <- is.na(x)
+  under.over.lengths.span <- if (all(nas)) c(0, 0) else range(nchar(x[!nas], type = "bytes") - payload.cap)
+  if (under.over.lengths.span[2] > 0)
+    warning("Long strings were truncated")
+  if (any(under.over.lengths.span != 0) || any(nas)) {
+    x <- lapply(x, charToRaw)
+    x[!nas] <- lapply(x[!nas], function(u) {
+      under.over.length <- length(u) - payload.cap
+      if (under.over.length <= 0)
+        c(u, raw(1 - under.over.length))
+      else if (under.over.length > 0)
+        c(u[1:payload.cap], raw(1))
+    })
+    
+    # Strings that start with as.raw(c(0x00, 0xff)) represent NA.
+    na.representation <- raw(payload.cap + 1)
+    na.representation[2] <- as.raw(0xff)
+    x[nas] <- list(na.representation)
+    
+    x <- do.call(c, x)
   }
-  #if( !identical(mode, char(nchar(x[1])))){
-  writeBin(x, file, size = nbytes)
+  
+  writeBin(x, file)
   mmap(file, as.Ctype(mode))
 }
 

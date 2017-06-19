@@ -378,7 +378,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
   double realbuf;
   Rcomplex Rcomplexbuf; 
 
-  unsigned char *byte_buf;
   SEXP byteBuf;
   int *int_dat;
   int *lgl_dat;
@@ -402,7 +401,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
   /* need R typed storage for structures... 
      ideally we needn't alloc for types
      that are not used --- move alloc to do that */
-  int hasnul = 1;
+  int hasnul;
   int fieldCbytes;
   int fieldSigned;
   int offset;
@@ -411,7 +410,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
   int *int_vec_dat; 
   double *real_vec_dat;
   char *str;  /* temp store for string cp */
-  char *str_buf = R_alloc(sizeof(char), Cbytes+1); /* len+\0 */ 
   Rcomplex *complex_vec_dat;
   Rbyte *raw_vec_dat;
 
@@ -634,31 +632,19 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
     }
     break; /* }}} */
   case STRSXP: /* {{{ */
-    /* see https://svn.r-project.org/R/trunk/src/main/raw.c */
-    /* fixed width character support */
-    if( !isNull(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))))
-      hasnul = asLogical(getAttrib(MMAP_SMODE(mmap_obj),install("nul")));
+    hasnul = !!(isNull(getAttrib(MMAP_SMODE(mmap_obj),install("nul")))
+                  || asLogical(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))));
     if(hasnul) { 
       for(i=0; i < LEN; i++) {
         str = (char *)(&(data[((long)index_p[i]-1)*Cbytes]));
-        SET_STRING_ELT(dat, i,
-          mkChar( (const char *)str));
-          //mkChar( (const char *)&(data[((long)index_p[i]-1)*Cbytes]) ));
-          //mkCharLenCE((const char *)&(data[((long)index_p[i]-1)*Cbytes]),
-          //            Cbytes-1, CE_NATIVE));
-          //mkCharLenCE((const char *)&(data[((long)index_p[i]-1)*Cbytes]),
-                      //strlen(&(data[((long)index_p[i]-1)*Cbytes])) /*Cbytes*/, CE_NATIVE));
-          //            (strlen(str) > Cbytes ? Cbytes : strlen(str))-1, CE_NATIVE));
+        SET_STRING_ELT(dat, i, (str[0] == 0 && str[1] != 0) ? NA_STRING
+                         : mkChar( (const char *)str));
       }
     } else {  /* nul-padded char array */
       for(i=0; i < LEN; i++) {
         str = (char *)(&(data[((long)index_p[i]-1)*Cbytes]));
-        strncpy(str_buf, str, Cbytes);
-        str_buf[Cbytes] = '\0';
-        SET_STRING_ELT(dat, i, mkChar( (const char *)str_buf));
-          //mkCharLenCE((const char *)&(data[((long)index_p[i]-1)*Cbytes]),
-                      //strlen(&(data[((long)index_p[i]-1)*Cbytes])) /*Cbytes*/, CE_NATIVE));
-         //             Cbytes, CE_NATIVE));
+        SET_STRING_ELT(dat, i, (str[0] == 0 && str[1] != 0) ? NA_STRING
+                         : mkCharLen((const char *)str, strnlen(str, Cbytes)));
       }
     }
     break; /* }}} */
@@ -715,12 +701,10 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
             case sizeof(char):
             if(fieldSigned) {   /* 1 byte char */
             for(ii=0; ii<LEN; ii++) {
-              //int_vec_dat[ii] = (int)(char)(byte_buf[ii*Cbytes+offset]);;
               int_vec_dat[ii] = (int)(char)(data[((long)index_p[ii]-1) * Cbytes + offset]);
             }
             } else {            /* 1 byte unsigned char */
             for(ii=0; ii<LEN; ii++) {
-              //int_vec_dat[ii] = (int)(unsigned char)(byte_buf[ii*Cbytes+offset]);;
               int_vec_dat[ii] = (int)(unsigned char)(data[((long)index_p[ii]-1) * Cbytes + offset]);
             }
             }
@@ -736,7 +720,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
             } else {            /* 2 byte unsigned short */
             for(ii=0; ii<LEN; ii++) {
               memcpy(&sbuf, 
-                     //&(byte_buf[ii*Cbytes+offset]),
                      &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                      sizeof(char)*sizeof(short));
               int_vec_dat[ii] = (int)(unsigned short)sbuf;
@@ -750,7 +733,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
             for(ii=0; ii<LEN; ii++) {
               memcpy(&intbuf, 
                      &(data[((long)index_p[ii]-1) * Cbytes+offset]),
-                     //&(byte_buf[ii*Cbytes+offset]),
                      sizeof(char)*sizeof(int));
               int_vec_dat[ii] = intbuf;
             }
@@ -766,7 +748,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
             case sizeof(float): /* 4 byte */
             for(ii=0; ii<LEN; ii++) {
               memcpy(&floatbuf, 
-                     //&(byte_buf[ii*Cbytes+offset]),
                      &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                      sizeof(char)*sizeof(float));
               real_vec_dat[ii] = (double)floatbuf;
@@ -778,7 +759,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
               /* casting from int64 to R double to minimize precision loss */
               for(ii=0;  ii < LEN; ii++) {
                 memcpy(&longbuf, 
-                       //&(byte_buf[ii*Cbytes+offset]),
                        &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                        sizeof(char)*sizeof(long));
                 real_vec_dat[ii] = (double)longbuf;
@@ -786,7 +766,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
             } else {
             for(ii=0; ii<LEN; ii++) {
               memcpy(&realbuf, 
-                     //&(byte_buf[ii*Cbytes+offset]),
                      &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                      sizeof(char)*sizeof(double));
               real_vec_dat[ii] = (double)realbuf;
@@ -801,7 +780,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           complex_vec_dat = COMPLEX(vec_dat);
           for(ii=0; ii<LEN; ii++) {
             memcpy(&Rcomplexbuf, 
-                   //&(byte_buf[ii*Cbytes+offset]),
                    &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                    sizeof(char)*sizeof(Rcomplex));
             complex_vec_dat[ii] = Rcomplexbuf;
@@ -813,33 +791,26 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           PROTECT(vec_dat = allocVector(RAWSXP, LEN));
           raw_vec_dat = RAW(vec_dat);
           for(ii=0; ii<LEN; ii++) {
-            //raw_vec_dat[ii] = (Rbyte)(byte_buf[ii*Cbytes+offset]);;
             raw_vec_dat[ii] = (Rbyte)(data[((long)index_p[ii]-1) * Cbytes + offset]);
           }
           SET_VECTOR_ELT(dat, fi, vec_dat);
           UNPROTECT(1);
           break;
         case STRSXP:
-          hasnul = INTEGER(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),
-                                      v),install("nul")))[0];
+          hasnul = !!(isNull(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),install("nul")))
+                        || asLogical(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),install("nul"))));
           PROTECT(vec_dat = allocVector(STRSXP, LEN));
           if(hasnul) {
             for(ii=0; ii < LEN; ii++) {
-              //str = (char *)&(byte_buf[ii*Cbytes+offset]);
               str = (char *)&( data[((long)index_p[ii]-1) * Cbytes + offset]);
-              SET_STRING_ELT(vec_dat, ii,
-                mkChar( (const char *)str));
-                //mkCharLenCE((const char *)&(byte_buf[ii*Cbytes+offset]),
-                //          fieldCbytes-1, CE_NATIVE));
+              SET_STRING_ELT(vec_dat, ii, (str[0] == 0 && str[1] != 0) ? NA_STRING
+                               : mkChar( (const char *)str));
             }
           } else {  /* nul-padded char array */
             for(ii=0; ii < LEN; ii++) {
-              //str = (char *)&(byte_buf[ii*Cbytes+offset]);
               str = (char *)&(data[((long)index_p[ii]-1) * Cbytes + offset]);
-              SET_STRING_ELT(vec_dat, ii,
-                mkCharLenCE((const char *)&(data[((long)index_p[ii]-1) * Cbytes + offset]), //byte_buf[ii*Cbytes+offset]),
-                      //    fieldCbytes, CE_NATIVE));
-                      (strlen(str) > fieldCbytes ? fieldCbytes : strlen(str)), CE_NATIVE));
+              SET_STRING_ELT(vec_dat, ii, (str[0] == 0 && str[1] != 0) ? NA_STRING
+                               : mkCharLen((const char *)str, strnlen(str, fieldCbytes)));
             }
           }
           SET_VECTOR_ELT(dat, fi, vec_dat);
@@ -871,7 +842,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
   int LEN = length(index);  
   int mode = MMAP_MODE(mmap_obj);
   int Cbytes = MMAP_CBYTES(mmap_obj);
-  //int hasnul = 1;
+  int hasnul;
   /*int isSigned = MMAP_SIGNED(mmap_obj);*/
   int P=0;
 
@@ -897,6 +868,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
   double *index_p = REAL(index);
   int new_word, int_buf;
   long which_word;
+  int charsxp_len;
   switch(mode) {
   case LGLSXP:
     lgl_value = LOGICAL(value);
@@ -1113,13 +1085,24 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
           }
           break;
         case STRSXP:
+          hasnul = !!(isNull(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),install("nul")))
+                        || asLogical(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),install("nul"))));
           LEN = length(VECTOR_ELT(value, fi));
           PROTECT(string_value = VECTOR_ELT(value, fi));
           for(i=0; i < LEN; i++) {
-            memset(&(data[((long)index_p[i]-1)*Cbytes+offset]), '\0', fieldCbytes);  /* clear fixed width */
-            memcpy(&(data[((long)index_p[i]-1)*Cbytes+offset]), 
-                   CHAR(STRING_ELT(string_value, i)), 
-                   fieldCbytes);
+            memset(&(data[((long)index_p[i]-1)*Cbytes+offset]), '\0', fieldCbytes);
+            charsxp_len = Rf_length(STRING_ELT(string_value,i));
+            if (STRING_ELT(string_value, i) == NA_STRING) {
+              // Strings that start with { 0x00, 0xff } represent NA.
+              data[((long)index_p[i]-1)*Cbytes+offset+1] = 0xff;
+            } else if (charsxp_len > fieldCbytes-hasnul) {
+              warning("Long strings were truncated");
+              memcpy(&(data[((long)index_p[i]-1)*Cbytes+offset]),
+                     CHAR(STRING_ELT(string_value, i)), fieldCbytes-hasnul);
+            } else {
+              memcpy(&(data[((long)index_p[i]-1)*Cbytes+offset]), 
+                     CHAR(STRING_ELT(string_value, i)), charsxp_len);
+            }
           }
           UNPROTECT(1);
           break;
@@ -1130,25 +1113,25 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
     } /* VECSXP }}} */
     break;
   case STRSXP:
-    if( !isNull(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))) &&
-        asLogical(getAttrib(MMAP_SMODE(mmap_obj),install("nul")))) {
-      for(i=0; i < LEN; i++) {
-        memset(&(data[((long)index_p[i]-1)*Cbytes]), '\0', Cbytes);
-        memcpy(&(data[((long)index_p[i]-1)*Cbytes]), CHAR(STRING_ELT(value,i)), Cbytes-1);
-      }
-    } else {
-      for(i=0; i < LEN; i++) {
-        memset(&(data[((long)index_p[i]-1)*Cbytes]), '\0', Cbytes);
-        memcpy(&(data[((long)index_p[i]-1)*Cbytes]), CHAR(STRING_ELT(value,i)), Cbytes);
+    // 0 if explicitly told that null-terminating character is unnecessary, 1 otherwise.
+    hasnul = !!(isNull(getAttrib(MMAP_SMODE(mmap_obj),install("nul")))
+                  || asLogical(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))));
+    for(i=0; i < LEN; i++) {
+      memset(&(data[((long)index_p[i]-1)*Cbytes]), '\0', Cbytes);
+      // strnlen(CHAR(STRING_ELT(value, i)), Cbytes) is definitely O(n).
+      // I'm hoping that R internally stores the length of strings
+      //  so that Rf_length(CHARSXP) is O(1).
+      charsxp_len = Rf_length(STRING_ELT(value,i));
+      if (STRING_ELT(value, i) == NA_STRING) {
+        // Strings that start with { 0x00, 0xff } represent NA.
+        data[((long)index_p[i]-1)*Cbytes+1] = 0xff;
+      } else if (charsxp_len > Cbytes-hasnul) {
+        warning("Long strings were truncated");
+        memcpy(&(data[((long)index_p[i]-1)*Cbytes]), CHAR(STRING_ELT(value,i)), Cbytes-hasnul);
+      } else {
+        memcpy(&(data[((long)index_p[i]-1)*Cbytes]), CHAR(STRING_ELT(value,i)), charsxp_len);
       }
     }
-    /*
-    } else {
-      for(i=0; i < LEN; i++) {
-        memcpy(&(data[(index_p[i]-1)*Cbytes]), CHAR(STRING_ELT(value,i)), Cbytes-1);
-      }
-    }
-    */
     break;
   case RAWSXP:
     byte_value = RAW(value);
@@ -1841,11 +1824,8 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     char *str;
     int str_len;
     char *str_buf = R_alloc(sizeof(char), Cbytes);
-    int hasnul = 1;
-    if( !isNull(getAttrib(MMAP_SMODE(mmap_obj), install("nul"))))
-      hasnul = asLogical(getAttrib(MMAP_SMODE(mmap_obj),install("nul")));
-
-    //if(isNull(getAttrib(MMAP_SMODE(mmap_obj),install("nul")))) {
+    int hasnul = !!(isNull(getAttrib(MMAP_SMODE(mmap_obj), install("nul")))
+                      || asLogical(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))));
     if(hasnul) {
       for(i=0; i < LEN; i++) {
         str = &(data[i*Cbytes]);
