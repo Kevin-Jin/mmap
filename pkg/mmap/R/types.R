@@ -36,7 +36,7 @@ as.Ctype.raw <- function(x) {
   else uchar(length(x))
 }
 as.Ctype.character <- function(x) {
-  char(nchar(x[!is.na(x)], type = "bytes"))
+  char(sample=x)
 }
 as.Ctype.complex <- function(x) {
   if(length(x) == 1 && x==0)
@@ -49,12 +49,33 @@ as.Ctype.logical <- function(x) {
   else logi32(length(x))
 }
 
-char <- C_char <- function(length=NULL, nul=TRUE) {
+char <- C_char <- function(length=NULL, enc=NULL, nul=TRUE, sample=NULL) {
+  if (!is.null(sample)) {
+    if (is.null(enc)) {
+      enc <- unique(Encoding(sample))
+      enc <- enc[enc != "unknown"]
+      if (length(enc) == 0)
+        # If none of the strings in the sample have codepoints above 0x7F,
+        #  then assign a single-byte encoding.
+        enc <- "latin1"
+      else if (length(enc) > 1)
+        # If the sample mixes multiple encodings (probably UTF-8 and latin1),
+        #  then assign "UTF-8" so that all characters can be represented.
+        enc <- "UTF-8"
+    }
+    if (is.null(length)) {
+      # Without this step, the number of bytes each string takes up
+      #  can be understated e.g. we reencode latin1 strings containing
+      #  codepoints above 0x7F as UTF-8.
+      sample <- normalize.encoding(sample, enc)
+      length <- max(nchar(sample[!is.na(sample)], type = "bytes"))
+    }
+  }
   if(is.null(length)) { # a char byte
     structure(raw(0), bytes=1L, signed=1L, class=c("Ctype","char"))
   } else {
     structure(character(max(length,1)+!!nul), bytes=as.integer(max(length,1)+!!nul), signed=0L,
-              nul=nul, class=c("Ctype","char"))
+              enc=enc, nul=nul, class=c("Ctype","char"))
   }
 }
 

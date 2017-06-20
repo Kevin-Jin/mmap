@@ -186,9 +186,24 @@ is.mmap <- function(x) {
   j <- j[j>0] # only positive values
   xx <- .Call("mmap_extract", i, as.integer(j), DIM, x, PKG="mmap")
   names(xx) <- names(x$storage.mode)[j]
+  if (is.struct(x$storage.mode)) {
+    for (col in j)
+      if (inherits(x$storage.mode[[col]], "char"))
+        Encoding(xx[[col]]) <- attr(x$storage.mode[[col]], "enc")
+  } else if (inherits(x$storage.mode, "char")) {
+    Encoding(xx) <- attr(x$storage.mode, "enc")
+  }
   if(is.null(extractFUN(x))) {
     xx
   } else as.function(extractFUN(x))(xx)
+}
+
+normalize.encoding <- function(x, to) {
+  original.encoding <- Encoding(x)
+  splitted <- split(x, original.encoding)
+  splitted[names(splitted) != "unknown"] <- lapply(names(splitted)[names(splitted) != "unknown"], function(from)
+    iconv(splitted[[from]], from, to))
+  unsplit(splitted, original.encoding)
 }
 
 `[<-.mmap` <- function(x, i, j, ..., sync=TRUE, value) {
@@ -222,6 +237,13 @@ is.mmap <- function(x) {
 # likely we need to check for list()/struct to correctly handle in C
   if(max(i) > length(x) || min(i) < 0)
     stop("improper 'i' range")
+  if (is.struct(x$storage.mode)) {
+    for (col in j)
+      if (inherits(x$storage.mode[[col]], "char"))
+        value[[col]] <- normalize.encoding(value[[col]], attr(x$storage.mode[[col]], "enc"))
+  } else if (inherits(x$storage.mode, "char")) {
+    value <- normalize.encoding(value, attr(x$storage.mode, "enc"))
+  }
   .Call("mmap_replace", i, j, value, x, PKG="mmap") 
   if(sync)
     msync(x)
@@ -294,10 +316,11 @@ as.mmap.complex <- function(x,
 }
 
 as.mmap.character <- function(x, 
-                              mode=char(max(nchar(x[!is.na(x)], type = "bytes"))),
+                              mode=char(sample=x),
                               file=tempmmap(), force=FALSE, ...) {
   payload.cap <- attr(mode, "bytes") - 1
   nas <- is.na(x)
+  x[!nas] <- normalize.encoding(x[!nas], attr(mode, "enc"))
   under.over.lengths.span <- if (all(nas)) c(0, 0) else range(nchar(x[!nas], type = "bytes") - payload.cap)
   if (under.over.lengths.span[2] > 0)
     warning("Long strings were truncated")
