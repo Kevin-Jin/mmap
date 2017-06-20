@@ -186,9 +186,27 @@ is.mmap <- function(x) {
   j <- j[j>0] # only positive values
   xx <- .Call("mmap_extract", i, as.integer(j), DIM, x, PKG="mmap")
   names(xx) <- names(x$storage.mode)[j]
+  if (is.struct(x$storage.mode)) {
+    for (fi in 1:length(j))
+      if (inherits(x$storage.mode[[j[fi]]], "string"))
+        Encoding(xx[[fi]]) <- attr(x$storage.mode[[j[fi]]], "enc")
+  } else if (inherits(x$storage.mode, "string")) {
+    Encoding(xx) <- attr(x$storage.mode, "enc")
+  }
   if(is.null(extractFUN(x))) {
     xx
   } else as.function(extractFUN(x))(xx)
+}
+
+normalize.encoding <- function(x, to) {
+  if (length(x) == 0)
+    return(x)
+  
+  original.encoding <- Encoding(x)
+  splitted <- split(x, original.encoding)
+  splitted[names(splitted) != "unknown"] <- lapply(names(splitted)[names(splitted) != "unknown"], function(from)
+    iconv(splitted[[from]], from, to))
+  unsplit(splitted, original.encoding)
 }
 
 `[<-.mmap` <- function(x, i, j, ..., sync=TRUE, value) {
@@ -203,10 +221,10 @@ is.mmap <- function(x) {
       j <- 1:length(x$storage.mode)
     if(is.character(j))
       j <- match(j, names(x$storage.mode))
-    if(length(i) != length(value))
-      if(is.list(value))
-        value <- lapply(value, rep, length.out=length(i))
-      else value <- rep(value, length.out=length(i))
+    if(is.list(value) && any(length(i) != lengths(value)))
+      value <- lapply(value, rep, length.out=length(i))
+    else if(!is.list(value) && length(i) != length(value))
+      value <- rep(value, length.out=length(i))
   } else { # has dimension
     if(missing(i))
       i <- 1:dim(x)[1]
@@ -222,6 +240,15 @@ is.mmap <- function(x) {
 # likely we need to check for list()/struct to correctly handle in C
   if(max(i) > length(x) || min(i) < 0)
     stop("improper 'i' range")
+  if (is.struct(x$storage.mode)) {
+    if(length(j) != length(value))
+      value <- rep(value, length.out=length(j))
+    for (fi in 1:length(j))
+      if (inherits(x$storage.mode[[j[fi]]], "string"))
+        value[[fi]] <- normalize.encoding(as.character(value[[fi]]), attr(x$storage.mode[[j[fi]]], "enc"))
+  } else if (inherits(x$storage.mode, "string")) {
+    value <- normalize.encoding(value, attr(x$storage.mode, "enc"))
+  }
   .Call("mmap_replace", i, j, value, x, PKG="mmap") 
   if(sync)
     msync(x)
@@ -259,11 +286,9 @@ as.mmap <- function(x, mode, file,...) {
   UseMethod("as.mmap")
 }
 
-#as.mmap.data.frame <- function(x, mode=as.struct(x), file, ...) 
-
 as.mmap.raw <- function(x, mode=raw(), file=tempmmap(), ...) {
   writeBin(x, file)
-  mmap(file, raw())
+  mmap(file, as.Ctype(mode))
 }
 
 as.mmap.integer <- function(x,
@@ -294,21 +319,40 @@ as.mmap.complex <- function(x,
 }
 
 as.mmap.character <- function(x, 
-                              mode=char(nchar(x[1])), 
+                              mode=char(sample=x),
                               file=tempmmap(), force=FALSE, ...) {
-  if( !all(nchar(x) == nchar(x[1]))) {
-    if(!force)
-      stop("requires fixed-width character vector. Use make.fixedwidth first.")
-    x <- make.fixedwidth(x)
+  mode <- as.Ctype(mode)
+  payload.cap <- attr(mode, "bytes") - 1
+  nas <- is.na(x)
+  x[!nas] <- normalize.encoding(x[!nas], attr(mode, "enc"))
+  under.over.lengths.span <- if (all(nas)) c(0, 0) else range(nchar(x[!nas], type = "bytes") - payload.cap)
+  if (under.over.lengths.span[2] > 0)
+    warning("Long strings were truncated")
+  if (any(under.over.lengths.span != 0) || any(nas)) {
+    x <- lapply(x, charToRaw)
+    x[!nas] <- lapply(x[!nas], function(u) {
+      under.over.length <- length(u) - payload.cap
+      if (under.over.length <= 0)
+        c(u, raw(1 - under.over.length))
+      else if (under.over.length > 0)
+        c(u[1:payload.cap], raw(1))
+    })
+    
+    # Strings that start with as.raw(c(0x00, 0xff)) represent NA.
+    na.representation <- raw(payload.cap + 1)
+    na.representation[2] <- as.raw(0xff)
+    x[nas] <- list(na.representation)
+    
+    x <- do.call(c, x)
   }
-  #if( !identical(mode, char(nchar(x[1])))){
-  writeBin(x, file, size = nbytes)
+  
+  writeBin(x, file)
   mmap(file, as.Ctype(mode))
 }
 
 as.mmap.matrix <- function(x, mode, file=tempmmap(), ...) {
   if( missing(mode))
-    mode <- vector(storage.mode(x))
+    mode <- as.Ctype(x)
   DIM <- dim(x)
   dim(x) <- NULL
   x <- as.mmap(x, mode, file, ...)
@@ -320,12 +364,9 @@ as.mmap.data.frame <- function(x, mode, file, ...) {
   if( !missing(mode))
     warning("'mode' argument currently unsupported")
   tmp <- tempfile()
-  bytes.needed <- function(x) {
-    sum(sapply(x, function(X) sizeof(as.Ctype(do.call(storage.mode(X),list(0)))))) * NROW(x)
-  }
-  writeBin(rep(as.raw(0), bytes.needed(x)), tmp)
-  struct.type <- do.call(struct, sapply(x, function(X) (do.call(storage.mode(X),list(0)))))
-  m <- mmap(tmp, struct.type, extractFUN=function(x) as.data.frame(x))
+  struct.type <- do.call(struct, lapply(x, as.Ctype))
+  writeBin(raw(sizeof(struct.type) * NROW(x)), tmp)
+  m <- mmap(tmp, struct.type, extractFUN=as.data.frame)
   dimnames(m) <- list(NULL, colnames(x))
   for(i in 1:NCOL(x)) {
     m[,i] <- x[,i]

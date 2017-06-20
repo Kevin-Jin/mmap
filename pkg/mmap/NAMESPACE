@@ -39,8 +39,6 @@ export(
        is.array.mmap,
        sizeof,
 
-       make.fixedwidth,
-
        mmap.csv
       )
 
