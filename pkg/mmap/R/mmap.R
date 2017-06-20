@@ -187,10 +187,10 @@ is.mmap <- function(x) {
   xx <- .Call("mmap_extract", i, as.integer(j), DIM, x, PKG="mmap")
   names(xx) <- names(x$storage.mode)[j]
   if (is.struct(x$storage.mode)) {
-    for (col in j)
-      if (inherits(x$storage.mode[[col]], "char"))
-        Encoding(xx[[col]]) <- attr(x$storage.mode[[col]], "enc")
-  } else if (inherits(x$storage.mode, "char")) {
+    for (fi in 1:length(j))
+      if (inherits(x$storage.mode[[j[fi]]], "string"))
+        Encoding(xx[[fi]]) <- attr(x$storage.mode[[j[fi]]], "enc")
+  } else if (inherits(x$storage.mode, "string")) {
     Encoding(xx) <- attr(x$storage.mode, "enc")
   }
   if(is.null(extractFUN(x))) {
@@ -199,6 +199,9 @@ is.mmap <- function(x) {
 }
 
 normalize.encoding <- function(x, to) {
+  if (length(x) == 0)
+    return(x)
+  
   original.encoding <- Encoding(x)
   splitted <- split(x, original.encoding)
   splitted[names(splitted) != "unknown"] <- lapply(names(splitted)[names(splitted) != "unknown"], function(from)
@@ -218,10 +221,10 @@ normalize.encoding <- function(x, to) {
       j <- 1:length(x$storage.mode)
     if(is.character(j))
       j <- match(j, names(x$storage.mode))
-    if(length(i) != length(value))
-      if(is.list(value))
-        value <- lapply(value, rep, length.out=length(i))
-      else value <- rep(value, length.out=length(i))
+    if(is.list(value) && any(length(i) != lengths(value)))
+      value <- lapply(value, rep, length.out=length(i))
+    else if(!is.list(value) && length(i) != length(value))
+      value <- rep(value, length.out=length(i))
   } else { # has dimension
     if(missing(i))
       i <- 1:dim(x)[1]
@@ -238,10 +241,12 @@ normalize.encoding <- function(x, to) {
   if(max(i) > length(x) || min(i) < 0)
     stop("improper 'i' range")
   if (is.struct(x$storage.mode)) {
-    for (col in j)
-      if (inherits(x$storage.mode[[col]], "char"))
-        value[[col]] <- normalize.encoding(value[[col]], attr(x$storage.mode[[col]], "enc"))
-  } else if (inherits(x$storage.mode, "char")) {
+    if(length(j) != length(value))
+      value <- rep(value, length.out=length(j))
+    for (fi in 1:length(j))
+      if (inherits(x$storage.mode[[j[fi]]], "string"))
+        value[[fi]] <- normalize.encoding(as.character(value[[fi]]), attr(x$storage.mode[[j[fi]]], "enc"))
+  } else if (inherits(x$storage.mode, "string")) {
     value <- normalize.encoding(value, attr(x$storage.mode, "enc"))
   }
   .Call("mmap_replace", i, j, value, x, PKG="mmap") 
@@ -281,11 +286,9 @@ as.mmap <- function(x, mode, file,...) {
   UseMethod("as.mmap")
 }
 
-#as.mmap.data.frame <- function(x, mode=as.struct(x), file, ...) 
-
 as.mmap.raw <- function(x, mode=raw(), file=tempmmap(), ...) {
   writeBin(x, file)
-  mmap(file, raw())
+  mmap(file, as.Ctype(mode))
 }
 
 as.mmap.integer <- function(x,
@@ -318,6 +321,7 @@ as.mmap.complex <- function(x,
 as.mmap.character <- function(x, 
                               mode=char(sample=x),
                               file=tempmmap(), force=FALSE, ...) {
+  mode <- as.Ctype(mode)
   payload.cap <- attr(mode, "bytes") - 1
   nas <- is.na(x)
   x[!nas] <- normalize.encoding(x[!nas], attr(mode, "enc"))
@@ -348,7 +352,7 @@ as.mmap.character <- function(x,
 
 as.mmap.matrix <- function(x, mode, file=tempmmap(), ...) {
   if( missing(mode))
-    mode <- vector(storage.mode(x))
+    mode <- as.Ctype(x)
   DIM <- dim(x)
   dim(x) <- NULL
   x <- as.mmap(x, mode, file, ...)
@@ -360,12 +364,9 @@ as.mmap.data.frame <- function(x, mode, file, ...) {
   if( !missing(mode))
     warning("'mode' argument currently unsupported")
   tmp <- tempfile()
-  bytes.needed <- function(x) {
-    sum(sapply(x, function(X) sizeof(as.Ctype(do.call(storage.mode(X),list(0)))))) * NROW(x)
-  }
-  writeBin(rep(as.raw(0), bytes.needed(x)), tmp)
-  struct.type <- do.call(struct, sapply(x, function(X) (do.call(storage.mode(X),list(0)))))
-  m <- mmap(tmp, struct.type, extractFUN=function(x) as.data.frame(x))
+  struct.type <- do.call(struct, lapply(x, as.Ctype))
+  writeBin(raw(sizeof(struct.type) * NROW(x)), tmp)
+  m <- mmap(tmp, struct.type, extractFUN=as.data.frame)
   dimnames(m) <- list(NULL, colnames(x))
   for(i in 1:NCOL(x)) {
     m[,i] <- x[,i]

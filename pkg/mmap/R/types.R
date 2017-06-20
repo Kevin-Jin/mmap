@@ -50,7 +50,7 @@ as.Ctype.logical <- function(x) {
 }
 
 char <- C_char <- function(length=NULL, enc=NULL, nul=TRUE, sample=NULL) {
-  if (!is.null(sample)) {
+  if (length(sample) > 0) {
     if (is.null(enc)) {
       enc <- unique(Encoding(sample))
       enc <- enc[enc != "unknown"]
@@ -70,12 +70,15 @@ char <- C_char <- function(length=NULL, enc=NULL, nul=TRUE, sample=NULL) {
       sample <- normalize.encoding(sample, enc)
       length <- max(nchar(sample[!is.na(sample)], type = "bytes"))
     }
+  } else if (!is.null(sample)) {
+    enc <- "latin1"
+    length <- 0
   }
   if(is.null(length)) { # a char byte
     structure(raw(0), bytes=1L, signed=1L, class=c("Ctype","char"))
   } else {
     structure(character(max(length,1)+!!nul), bytes=as.integer(max(length,1)+!!nul), signed=0L,
-              enc=enc, nul=nul, class=c("Ctype","char"))
+              enc=enc, nul=nul, class=c("Ctype","char","string"))
   }
 }
 
