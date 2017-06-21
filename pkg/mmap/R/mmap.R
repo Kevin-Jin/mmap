@@ -165,7 +165,7 @@ is.mmap <- function(x) {
 }
 
 `[.mmap` <- function(x, i, j, ...) {
-  if(!x$bytes) stop('no data to extract')
+  if(sizeof(x) == 0) stop('no data to extract')
   if( is.struct(x$storage.mode) || is.null(x$dim)) {
     if(missing(i))
       i <- 1:length(x)
@@ -211,7 +211,7 @@ normalize.encoding <- function(x, to) {
 
 `[<-.mmap` <- function(x, i, j, ..., sync=TRUE, value) {
   # add type checking/coercing at the C-level
-  if(!x$bytes) stop('no data to extract')
+  if(sizeof(x) == 0) stop('no data to extract')
   if(is.struct(x$storage.mode) && !is.list(value))
     value <- list(value)
   if( is.struct(x$storage.mode) || is.null(x$dim)) {
@@ -256,18 +256,18 @@ normalize.encoding <- function(x, to) {
 }
 
 length.mmap <- function(x) {
-  size_in_bytes <- x$bytes
-  size <- attr(x$storage.mode,"bytes")
+  size_in_bytes <- sizeof(x)
+  size <- sizeof(x$storage.mode)
   if( class(x$storage.mode)[2] == 'bits')
     trunc(size_in_bytes/size) * 32L
   else
-  trunc(size_in_bytes/size)
+    trunc(size_in_bytes/size)
 }
 
 `length<-.mmap` <- function(x, value) {
   # should have some mechanism to sanity check length
   # as to not pass end of file
-  size_in_bytes <- value * attr(x$storage.mode, "bytes")
+  size_in_bytes <- value * sizeof(x$storage.mode)
   if(file.info(names(x$filedesc))$size < size_in_bytes) {
     stop("cannot increase an mmap file's size") # implement something automatic here
   }
@@ -287,42 +287,46 @@ as.mmap <- function(x, mode, file,...) {
 }
 
 as.mmap.raw <- function(x, mode=raw(), file=tempmmap(), ...) {
+  mode <- as.Ctype(mode)
   writeBin(x, file)
-  mmap(file, as.Ctype(mode))
+  mmap(file, mode)
 }
 
 as.mmap.integer <- function(x,
                             mode=integer(),
                             file=tempmmap(),
                             ...) {
-  nbytes <- attr(as.Ctype(mode),"bytes")
+  mode <- as.Ctype(mode)
+  nbytes <- sizeof(mode)
   if(nbytes == 3) {
     writeBin(writeBin(x,raw())[1:(length(x)*4) %% 4 != 0], file)
   } else writeBin(x, file, size=nbytes)
-  mmap(file, as.Ctype(mode))
+  mmap(file, mode)
 }
 as.mmap.double <- function(x,
                             mode=double(),
                             file=tempmmap(),
                             ...) {
-  nbytes <- attr(as.Ctype(mode),"bytes")
+  mode <- as.Ctype(mode)
+  nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes)
-  mmap(file, as.Ctype(mode))
+  mmap(file, mode)
 }
 as.mmap.complex <- function(x,
                             mode=complex(),
                             file=tempmmap(),
                             ...) {
-  nbytes <- attr(as.Ctype(mode),"bytes")
+  mode <- as.Ctype(mode)
+  nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes)
-  mmap(file, as.Ctype(mode))
+  mmap(file, mode)
 }
 
 as.mmap.character <- function(x, 
                               mode=char(sample=x),
                               file=tempmmap(), force=FALSE, ...) {
   mode <- as.Ctype(mode)
-  payload.cap <- attr(mode, "bytes") - 1
+  payload.cap <- sizeof(mode) - 1
   nas <- is.na(x)
   x[!nas] <- normalize.encoding(x[!nas], attr(mode, "enc"))
   under.over.lengths.span <- if (all(nas)) c(0, 0) else range(nchar(x[!nas], type = "bytes") - payload.cap)
@@ -347,12 +351,10 @@ as.mmap.character <- function(x,
   }
   
   writeBin(x, file)
-  mmap(file, as.Ctype(mode))
+  mmap(file, mode)
 }
 
-as.mmap.matrix <- function(x, mode, file=tempmmap(), ...) {
-  if( missing(mode))
-    mode <- as.Ctype(x)
+as.mmap.matrix <- function(x, mode = as.Ctype(x), file=tempmmap(), ...) {
   DIM <- dim(x)
   dim(x) <- NULL
   x <- as.mmap(x, mode, file, ...)
@@ -363,10 +365,10 @@ as.mmap.matrix <- function(x, mode, file=tempmmap(), ...) {
 as.mmap.data.frame <- function(x, mode, file, ...) {
   if( !missing(mode))
     warning("'mode' argument currently unsupported")
+  mode <- as.struct(x)
   tmp <- tempfile()
-  struct.type <- do.call(struct, lapply(x, as.Ctype))
-  writeBin(raw(sizeof(struct.type) * NROW(x)), tmp)
-  m <- mmap(tmp, struct.type, extractFUN=as.data.frame)
+  writeBin(raw(sizeof(mode) * NROW(x)), tmp)
+  m <- mmap(tmp, mode, extractFUN=as.data.frame)
   dimnames(m) <- list(NULL, colnames(x))
   for(i in 1:NCOL(x)) {
     m[,i] <- x[,i]

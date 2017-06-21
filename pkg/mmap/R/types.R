@@ -10,7 +10,7 @@ as.Ctype <- function(x) {
 
 is.Ctype <- function(x) inherits(x, "Ctype")
 
-as.Ctype.Ctype <- function(x) return(x)
+as.Ctype.Ctype <- identity
 
 as.Ctype.integer <- function(x) {
   if(length(x) == 1 && x==0)
@@ -199,13 +199,13 @@ pad.default <- function(length=0, ...) {
 }
 
 pad.Ctype <- function(ctype, ...) {
-  pad(attr(ctype, "bytes"))
+  pad(sizeof(ctype))
 }
 
 .struct <- function (..., bytes, offset) {
     dots <- lapply(list(...), as.Ctype)
     if( missing(bytes))
-      bytes <- sapply(dots, attr, which = "bytes")
+      bytes <- sapply(dots, sizeof)
     if( missing(offset))
       offset <- cumsum(bytes) - bytes
     structure(dots, bytes = as.integer(sum(bytes)), 
@@ -216,7 +216,7 @@ pad.Ctype <- function(ctype, ...) {
 
 struct <- function (..., bytes, offset) {
     dots <- lapply(list(...), as.Ctype)
-    bytes_ <- sapply(dots, attr, which = "bytes")
+    bytes_ <- sapply(dots, sizeof)
     if (missing(offset)) 
       offset <- cumsum(bytes_) - bytes_
     if (!missing(bytes)) 
@@ -274,46 +274,50 @@ as.struct <- function(x, ...) {
   UseMethod("as.struct")
 }
 
-as.struct.default <- function(x, ...) {
-  if(inherits(x,"struct"))
-    return(x)
-  x <- as.list(x)
-  types <- lapply(lapply(x,class), 
-             function(CLASS) switch(CLASS,
-                             "raw"=char(),
-                             "integer"=int32(),
-                             "numeric"=,
-                             "double"=real64(),
-                             "complex"=cplx())
-            )
-  do.call(struct, types)
-}
+as.struct.struct <- function(x, ...) x
 
-nbytes <- function(x) UseMethod("nbytes")
-nbytes.Ctype <- function(x) attr(x, "bytes")
-nbytes.mmap <- function(x) x$bytes
+as.struct.default <- function(x, ...) {
+  # According to src/main/util.c#TypeTable, src/main/coerce.c#do_is, and src/include/Rinlinedfuns.h#isFunction,
+  #  some functions of interest are implemented as:
+  #   is.atomic(x)    <- typeof(x) %in% c("NULL", "char", "logical", "integer", "double", "complex", "character", "raw")
+  #   is.language(x)  <- typeof(x) %in% c("symbol" (name), "language" (call), "expression")
+  #   is.function(x)  <- typeof(x) %in% c("closure", "builtin", "special")
+  #   is.recursive(x) <- typeof(x) %in% c("list", "pairlist", "environment") || is.language(x) && typeof(x) != "symbol" || is.function(x) || typeof(x) %in% c("promise", "...", "any")
+  # The remaining types not yet mentioned are "externalptr", "bytecode", "weakref", and "S4".
+  # Technically, "language", "expression", "closure", "builtin", "special", "promise", "...", "any" are basically lists, mostly
+  #  of symbols, so `lapply(x, as.Ctype)` would not fail with a cryptic error message. The error would arise once as.Ctype()
+  #  is called on a type that is neither atomic nor recursive, i.e. "symbol", "externalptr", "bytecode", "weakref", or "S4".
+  # Since the error message will still be legible in the end, it is acceptable to just use the condition `is.recursive(x)` for simplicity.
+  if (is.atomic(x))
+    # Single field.
+    struct(as.Ctype(x))
+  else if (is.recursive(x))
+    # Multiple fields.
+    do.call(struct, lapply(x, as.Ctype))
+  else
+    # stopifnot(typeof(x) %in% c("symbol", "externalptr", "bytecode", "weakref", "S4"))
+    stop(paste("Low-level language type '", typeof(x), "' is unsupported", sep = ""))
+}
 
 ##  sizeof analogous to sizeof() in C.  Allows for
 ##  passing either Ctype objects, or functions that
 ##  construct Ctype objects.
 ##    e.g. sizeof(int8) or sizeof(int8())
 
-sizeof <- function(type) {
-  UseMethod("sizeof")
-}
+sizeof <- function(type) UseMethod("sizeof")
 
 sizeof.function <- function(type) {
   type_name <- deparse(substitute(type))
   type <- try(as.Ctype(type()), silent=TRUE)
   if( is.Ctype(type))
-    nbytes(type)
+    sizeof(type)
   else
     stop(paste("can't find 'sizeof'",type_name))
 }
 
-sizeof.Ctype <- function(type) {
-  nbytes(type)
-}
+sizeof.Ctype <- function(x) attr(x, "bytes")
+
+sizeof.mmap <- function(x) x$bytes
 
 sizeof.default <- function(type) {
   ty <- try( as.Ctype(type), silent=TRUE)

@@ -32,7 +32,6 @@ export(
 
        as.Ctype,
        is.Ctype,
-       nbytes,
 
        dim.mmap, "dim<-.mmap",
        dimnames.mmap, "dimnames<-.mmap",
@@ -88,12 +87,10 @@ S3method(as.int16, mmap)
 S3method(as.uint16, mmap)
 S3method(as.int24, mmap)
 
-S3method(nbytes, Ctype)
-S3method(nbytes, mmap)
-
 S3method(sizeof, default)
 S3method(sizeof, Ctype)
 S3method(sizeof, "function")
+S3method(sizeof, mmap)
 
 S3method(pad, default)
 S3method(pad, Ctype)
