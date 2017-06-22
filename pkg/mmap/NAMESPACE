@@ -19,11 +19,11 @@ export(
 
        bits,  # not yet implemented
        logi8, logi32,
-       char,  int8,  int16,  int24,  int32,  
-       uchar, uint8, uint16, uint24, int64,
+       char,  int8,  int16,  int32,  
+       uchar, uint8, uint16, int64,
        real32, real64,
        cplx,
-       as.uchar, as.char, as.int8, as.uint8, as.int16, as.uint16, as.int24,
+       as.uchar, as.char, as.int8, as.uint8, as.int16, as.uint16,
        pad,
 
        struct,
@@ -85,7 +85,6 @@ S3method(as.int8, mmap)
 S3method(as.uint8, mmap)
 S3method(as.int16, mmap)
 S3method(as.uint16, mmap)
-S3method(as.int24, mmap)
 
 S3method(sizeof, default)
 S3method(sizeof, Ctype)
