@@ -144,21 +144,6 @@ as.uint16.mmap <- function(x, length=0, ...) {
   x
 }
 
-int24 <- C_int24 <- function(length=0, endian=c("big", "little", "swap", "platform")) {
-  endian <- normalize.endianness(match.arg(endian))
-  structure(integer(length), bytes=3L, signed=1L, endian=endian, class=c("Ctype","int24"))
-}
-as.int24 <- function(x, length, ...) UseMethod("as.int24")
-as.int24.mmap <- function(x, length=0, ...) {
-  x$storage.mode <- int24(length)
-  x
-}
-
-uint24 <- C_uint24 <- function(length=0, endian=c("big", "little", "swap", "platform")) {
-  endian <- normalize.endianness(match.arg(endian))
-  structure(integer(length), bytes=3L, signed=0L, endian=endian, class=c("Ctype","uint24"))
-}
-
 int32 <- C_int <- function(length=0, endian=c("big", "little", "swap", "platform")) {
   endian <- normalize.endianness(match.arg(endian))
   structure(integer(length), bytes=4L, signed=1L, endian=endian, class=c("Ctype","int"))

@@ -369,15 +369,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
   int P=0;
   unsigned char *data; /* unsigned int and values */
 
-  /* 24 bit integers require a mask of the depending
-     on whether the type is signed or unsigned */
-  /*
-  char *int24_buf[4],
-       *uint24_buf[4];
-  memset(int24_buf, 0, 4);
-  memset(uint24_buf, 0xFF, 4); // used to convert overflow to negative
-  */
-
   PROTECT(index = coerceVector(index,REALSXP)); P++;
   int LEN = length(index);  
   int mode = MMAP_MODE(mmap_obj);
@@ -537,49 +528,6 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
             sbuf = swapb16(sbuf);
           int_dat[i] = (int)(unsigned short)sbuf;
         }  
-        }
-        break;
-      case 3: /* 3 byte int */
-        swap = LOGICAL(swap_byte_order)[0];
-        if(isSigned) {
-        for(i=0;  i < LEN; i++) {
-          ival =  ((long)index_p[i]-1);
-          if( ival > upper_bound || ival < 0 ) {
-            if( ival == 0 ) {
-              continue;
-            }
-            error("'i=%i' out of bounds", index_p[i]);
-          }
-          intbuf = 0;
-          memcpy(&intbuf, 
-                 &(data[((long)index_p[i]-1)*3]), /* copy first 3 bytes */
-                 3);
-          // TODO: swapb() is ugly in this case. Just delete int24 type instead.
-          int_dat[i] = intbuf;
-          if(int_dat[i] > 8388607) {  /* MAX 3 byte unsigned INTEGER */
-            intbuf = -1;
-            memcpy(&intbuf, 
-                   &(data[((long)index_p[i]-1)*3]), // copy first 3 bytes
-                   3);
-            int_dat[i] = intbuf;
-          }
-        }
-        } else { /* 3 byte unsigned */
-        for(i=0;  i < LEN; i++) {
-          ival =  ((long)index_p[i]-1);
-          if( ival > upper_bound || ival < 0 ) {
-            if( ival == 0 ) {
-              continue;
-            }
-            error("'i=%i' out of bounds", index_p[i]);
-          }
-          intbuf = 0;
-          memcpy(&intbuf, 
-                 &(data[((long)index_p[i]-1)*3]), /* copy first 3 bytes */
-                 3);
-          // TODO: swapb() is ugly in this case. Just delete int24 type instead.
-          int_dat[i] = intbuf;
-        }
         }
         break;
       case 4: /* 4 byte int */
@@ -1001,16 +949,6 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
           memcpy(&(data[((long)index_p[i]-1)*sizeof(short)]), &(short_value), sizeof(short));
         }
       break;
-      case 3: /* case 3 byte */
-      swap = LOGICAL(swap_byte_order)[0];
-      for(i=0;  i < LEN; i++) {
-        ival = ((long)index_p[i]-1)*3;
-        if( ival > upper_bound || ival < 0 )
-          error("'i=%i' out of bounds", index_p[i]);
-        // TODO: swapb() is ugly in this case. Just delete int24 type instead.
-        memcpy(&(data[((long)index_p[i]-1)*3]), &(int_value[i]), 3);
-      }
-      break;
       case sizeof(int): /* 4 byte int */
         swap = LOGICAL(swap_byte_order)[0];
         for(i=0;  i < LEN; i++) {
@@ -1270,13 +1208,6 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
   short shortbuf;
   float floatbuf;
   double realbuf;
-
-  /* 24 bit integers require a mask of the depending
-     on whether the type is signed or unsigned */
-  char *int24_buf[4],
-       *uint24_buf[4];  
-  memset(int24_buf, 0, 4); // 0
-  memset(uint24_buf, 0xFF, 4);  // -1
 
   long LEN;
   int mode = MMAP_MODE(mmap_obj); 
@@ -1593,167 +1524,6 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
             int_result[hits++] = i+1;
         }
       } /* end of ushort */
-      }
-      break; /* }}} */
-    case 3: /* 3 byte int {{{ */
-      if(isSigned) {
-      if(cmp_how==1) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if((int)*((int *)(void *)&int24_buf) > 8388607) {  /* MAX 3 byte unsigned INTEGER */
-            memcpy(uint24_buf, 
-                   &(data[i*3]), /* copy first 3 bytes */
-                   3);
-            if(cmp_to_int == *((int *)(void *)&uint24_buf))
-              int_result[hits++] = i+1;
-          } else {
-            if(cmp_to_int == *((int *)(void *)&int24_buf)) 
-              int_result[hits++] = i+1;
-          }
-        }
-      } else
-      if(cmp_how==2) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(*((int *)(void *)&int24_buf) > 8388607) {  /* MAX 3 byte unsigned INTEGER */
-            memcpy(uint24_buf, 
-                   &(data[i*3]), /* copy first 3 bytes */
-                   3);
-            if(cmp_to_int != *((int *)(void *)&uint24_buf)) 
-              int_result[hits++] = i+1;
-          } else {
-            if(cmp_to_int != *((int *)(void *)&int24_buf)) 
-              int_result[hits++] = i+1;
-          }
-        }
-      } else
-      if(cmp_how==3) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(*((int *)(void *)&int24_buf) > 8388607) {  /* MAX 3 byte unsigned INTEGER */
-            memcpy(uint24_buf, 
-                   &(data[i*3]), /* copy first 3 bytes */
-                   3);
-            if(cmp_to_int <= *((int *)(void *)&uint24_buf)) 
-              int_result[hits++] = i+1;
-          } else {
-            if(cmp_to_int <= *((int *)(void *)&int24_buf)) 
-              int_result[hits++] = i+1;
-          }
-        }
-      } else
-      if(cmp_how==4) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(*((int *)(void *)&int24_buf) > 8388607) {  /* MAX 3 byte unsigned INTEGER */
-            memcpy(uint24_buf, 
-                   &(data[i*3]), /* copy first 3 bytes */
-                   3);
-            if(cmp_to_int >= *((int *)(void *)&uint24_buf)) 
-              int_result[hits++] = i+1;
-          } else {
-            if(cmp_to_int >= *((int *)(void *)&int24_buf)) 
-              int_result[hits++] = i+1;
-          }
-        }
-      } else
-      if(cmp_how==5) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(*((int *)(void *)&int24_buf) > 8388607) {  /* MAX 3 byte unsigned INTEGER */
-            memcpy(uint24_buf, 
-                   &(data[i*3]), /* copy first 3 bytes */
-                   3);
-            if(cmp_to_int < *((int *)(void *)&uint24_buf)) 
-              int_result[hits++] = i+1;
-          } else {
-            if(cmp_to_int < *((int *)(void *)&int24_buf)) 
-              int_result[hits++] = i+1;
-          }
-        }
-      } else
-      if(cmp_how==6) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(*((int *)(void *)&int24_buf) > 8388607) {  /* MAX 3 byte unsigned INTEGER */
-            memcpy(uint24_buf, 
-                   &(data[i*3]), /* copy first 3 bytes */
-                   3);
-            if(cmp_to_int > *((int *)(void *)&uint24_buf)) 
-              int_result[hits++] = i+1;
-          } else {
-            if(cmp_to_int > *((int *)(void *)&int24_buf)) 
-              int_result[hits++] = i+1;
-          }
-        }
-      }
-      } else { /* unsigned 3 byte int */
-      if(cmp_how==1) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(cmp_to_int == *((int *)(void *)&int24_buf))
-            int_result[hits++] = i+1;
-        }
-      } else
-      if(cmp_how==2) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(cmp_to_int != *((int *)(void *)&int24_buf))
-            int_result[hits++] = i+1;
-        }
-      } else
-      if(cmp_how==3) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(cmp_to_int <= *((int *)(void *)&int24_buf))
-            int_result[hits++] = i+1;
-        }
-      } else
-      if(cmp_how==4) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(cmp_to_int >= *((int *)(void *)&int24_buf))
-            int_result[hits++] = i+1;
-        }
-      } else
-      if(cmp_how==5) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(cmp_to_int <  *((int *)(void *)&int24_buf))
-            int_result[hits++] = i+1;
-        }
-      } else
-      if(cmp_how==6) {
-        for(i=0;  i < LEN; i++) {
-          memcpy(int24_buf, 
-                 &(data[i*3]), /* copy first 3 bytes */
-                 3);
-          if(cmp_to_int >  *((int *)(void *)&int24_buf))
-            int_result[hits++] = i+1;
-        }
-      } /* end of unsigned 3 byte */
       }
       break; /* }}} */
     case 4: /* int {{{ */

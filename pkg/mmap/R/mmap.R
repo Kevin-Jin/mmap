@@ -314,10 +314,7 @@ as.mmap.integer <- function(x,
                             ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
-  if(nbytes == 3)
-    writeBin(writeBin(x,raw())[1:(length(x)*4) %% 4 != 0], file, endian=attr(mode, "endian"))
-  else
-    writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
+  writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   mmap(file, mode)
 }
 as.mmap.double <- function(x,
