@@ -302,43 +302,32 @@ as.mmap <- function(x, mode, file,...) {
   UseMethod("as.mmap")
 }
 
-as.mmap.raw <- function(x, mode=raw(), file=tempmmap(), ...) {
+as.mmap.raw <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   writeBin(x, file)
   mmap(file, mode)
 }
 
-as.mmap.integer <- function(x,
-                            mode=integer(),
-                            file=tempmmap(),
-                            ...) {
+as.mmap.integer <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   mmap(file, mode)
 }
-as.mmap.double <- function(x,
-                            mode=double(),
-                            file=tempmmap(),
-                            ...) {
+as.mmap.double <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   mmap(file, mode)
 }
-as.mmap.complex <- function(x,
-                            mode=complex(),
-                            file=tempmmap(),
-                            ...) {
+as.mmap.complex <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   mmap(file, mode)
 }
 
-as.mmap.character <- function(x, 
-                              mode=char(sample=x),
-                              file=tempmmap(), ...) {
+as.mmap.character <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   payload.cap <- sizeof(mode) - 1
   nas <- is.na(x)
@@ -368,7 +357,7 @@ as.mmap.character <- function(x,
   mmap(file, mode)
 }
 
-as.mmap.matrix <- function(x, mode = as.Ctype(x), file=tempmmap(), ...) {
+as.mmap.matrix <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   DIM <- dim(x)
   dim(x) <- NULL
   x <- as.mmap(x, mode, file, ...)
@@ -376,14 +365,12 @@ as.mmap.matrix <- function(x, mode = as.Ctype(x), file=tempmmap(), ...) {
   x
 }
 
-as.mmap.data.frame <- function(x, mode, file, ...) {
+as.mmap.data.frame <- function(x, mode, file=tempmmap(), ...) {
   if( !missing(mode))
     warning("'mode' argument currently unsupported")
-  mode <- as.struct(x)
-  tmp <- tempfile()
-  writeBin(raw(sizeof(mode) * NROW(x)), tmp)
-  m <- mmap(tmp, mode, extractFUN=as.data.frame)
-  dimnames(m) <- list(NULL, colnames(x))
+  mode <- as.Ctype(x, ...)
+  writeBin(raw(sizeof(mode) * NROW(x)), file)
+  m <- mmap(file, mode, extractFUN=as.data.frame)
   for(i in 1:NCOL(x)) {
     m[,i] <- x[,i]
   }

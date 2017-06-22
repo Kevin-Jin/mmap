@@ -33,6 +33,9 @@ as.Ctype.complex <- function(x, ...) {
 as.Ctype.logical <- function(x, ...) {
   logi32(...)
 }
+as.Ctype.NULL <- function(x, ...) {
+  pad(...)
+}
 
 normalize.endianness <- function(endian)
   switch(endian, big="big", little="little", platform=.Platform$endian,
@@ -251,13 +254,7 @@ is.struct <- function(x) {
   inherits(x, "struct")
 }
 
-as.struct <- function(x, ...) {
-  UseMethod("as.struct")
-}
-
-as.struct.struct <- function(x, ...) x
-
-as.struct.default <- function(x, ...) {
+as.Ctype.default <- function(x, ...) {
   # According to src/main/util.c#TypeTable, src/main/coerce.c#do_is, and src/include/Rinlinedfuns.h#isFunction,
   #  some functions of interest are implemented as:
   #   is.atomic(x)    <- typeof(x) %in% c("NULL", "char", "logical", "integer", "double", "complex", "character", "raw")
@@ -271,10 +268,10 @@ as.struct.default <- function(x, ...) {
   # Since the error message will still be legible in the end, it is acceptable to just use the condition `is.recursive(x)` for simplicity.
   if (is.atomic(x))
     # Single field.
-    struct(as.Ctype(x))
+    stop(paste("Vector of class '", class(x)[1], "' is unsupported", sep = ""))
   else if (is.recursive(x))
     # Multiple fields.
-    do.call(struct, lapply(x, as.Ctype))
+    do.call(struct, c(lapply(x, as.Ctype), list(...)))
   else
     # stopifnot(typeof(x) %in% c("symbol", "externalptr", "bytecode", "weakref", "S4"))
     stop(paste("Low-level language type '", typeof(x), "' is unsupported", sep = ""))
