@@ -4,50 +4,59 @@ sizeofCtypes <- function() {
             .Names=c("char","short","int","long","float","double"))
 }
 
-as.Ctype <- function(x) {
+as.Ctype <- function(x, ...) {
   UseMethod("as.Ctype")
 }
 
 is.Ctype <- function(x) inherits(x, "Ctype")
 
-as.Ctype.Ctype <- identity
+as.Ctype.Ctype <- function(x, ...) x
 
-as.Ctype.integer <- function(x) {
+as.Ctype.integer <- function(x, ...) {
   if(length(x) == 1 && x==0)
-    int32()
-  else int32(length(x))
+    int32(...)
+  else
+    int32(length(x), ...)
 }
-as.Ctype.double <- function(x) {
+as.Ctype.double <- function(x, ...) {
   csingle <- attr(x, "Csingle")
   if( !is.null(csingle) && isTRUE(csingle)) {
     if(length(x) == 1 && x==0)
-      real32()
+      real32(...)
     else
-      real32(length(x))
+      real32(length(x), ...)
   } else {
     if(length(x) == 1 && x==0)
-      real64()
-    else real64(length(x))
+      real64(...)
+    else
+      real64(length(x), ...)
   }
 }
-as.Ctype.raw <- function(x) {
+as.Ctype.raw <- function(x, ...) {
   if(length(x) == 1 && x==0)
-    uchar()
-  else uchar(length(x))
+    uchar(...)
+  else
+    uchar(length(x), ...)
 }
-as.Ctype.character <- function(x) {
-  char(sample=x)
+as.Ctype.character <- function(x, ...) {
+  char(sample=x, ...)
 }
-as.Ctype.complex <- function(x) {
+as.Ctype.complex <- function(x, ...) {
   if(length(x) == 1 && x==0)
-    cplx()
-  else cplx(length(x))
+    cplx(...)
+  else
+    cplx(length(x), ...)
 }
-as.Ctype.logical <- function(x) {
+as.Ctype.logical <- function(x, ...) {
   if(length(x) == 1 && x==0)
-    logi32()
-  else logi32(length(x))
+    logi32(...)
+  else
+    logi32(length(x), ...)
 }
+
+normalize.endianness <- function(endian)
+  switch(endian, big="big", little="little", platform=.Platform$endian,
+         swap=if (.Platform$endian == "little") "big" else "little")
 
 char <- C_char <- function(length=NULL, enc=NULL, nul=TRUE, sample=NULL) {
   if (length(sample) > 0) {
@@ -85,14 +94,12 @@ char <- C_char <- function(length=NULL, enc=NULL, nul=TRUE, sample=NULL) {
 as.char <- function(x, ...) UseMethod("as.char")
 as.char.mmap <- function(x, length, ...) {
   x$storage.mode <- char(length)
-  x 
+  x
 }
 
 uchar <- C_uchar <- function(length=0) {
-  # unsigned 1 byte char
   structure(raw(length), bytes=1L, signed=0L, class=c("Ctype","uchar"))
 }
-
 as.uchar <- function(x, ...) UseMethod("as.uchar")
 as.uchar.mmap <- function(x, length, ...) {
   x$storage.mode <- uchar(length)
@@ -100,7 +107,6 @@ as.uchar.mmap <- function(x, length, ...) {
 }
 
 int8 <- function(length=0) {
-  # signed 1 byte int
   structure(integer(length), bytes=1L, signed=1L, class=c("Ctype","char"))
 }
 as.int8 <- function(x, length, ...) UseMethod("as.int8")
@@ -110,7 +116,6 @@ as.int8.mmap <- function(x, length=0, ...) {
 }
 
 uint8 <- function(length=0) {
-  # unsigned 1 byte int
   structure(integer(length), bytes=1L, signed=0L, class=c("Ctype","uchar"))
 }
 as.uint8 <- function(x, length, ...) UseMethod("as.uint8")
@@ -119,8 +124,9 @@ as.uint8.mmap <- function(x, length=0, ...) {
   x
 }
 
-int16 <- C_short <- function(length=0) {
-  structure(integer(length), bytes=2L, signed=1L, class=c("Ctype","short"))
+int16 <- C_short <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
+  structure(integer(length), bytes=2L, signed=1L, endian=endian, class=c("Ctype","short"))
 }
 as.int16 <- function(x, length, ...) UseMethod("as.int16")
 as.int16.mmap <- function(x, length=0, ...) {
@@ -128,8 +134,9 @@ as.int16.mmap <- function(x, length=0, ...) {
   x
 }
 
-uint16 <- C_ushort <- function(length=0) {
-  structure(integer(length), bytes=2L, signed=0L, class=c("Ctype","ushort"))
+uint16 <- C_ushort <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
+  structure(integer(length), bytes=2L, signed=0L, endian=endian, class=c("Ctype","ushort"))
 }
 as.uint16 <- function(x, length, ...) UseMethod("as.uint16")
 as.uint16.mmap <- function(x, length=0, ...) {
@@ -137,8 +144,9 @@ as.uint16.mmap <- function(x, length=0, ...) {
   x
 }
 
-int24 <- C_int24 <- function(length=0) {
-  structure(integer(length), bytes=3L, signed=1L, class=c("Ctype","int24"))
+int24 <- C_int24 <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
+  structure(integer(length), bytes=3L, signed=1L, endian=endian, class=c("Ctype","int24"))
 }
 as.int24 <- function(x, length, ...) UseMethod("as.int24")
 as.int24.mmap <- function(x, length=0, ...) {
@@ -146,44 +154,53 @@ as.int24.mmap <- function(x, length=0, ...) {
   x
 }
 
-uint24 <- C_uint24 <- function(length=0) {
-  structure(integer(length), bytes=3L, signed=0L, class=c("Ctype","uint24"))
+uint24 <- C_uint24 <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
+  structure(integer(length), bytes=3L, signed=0L, endian=endian, class=c("Ctype","uint24"))
 }
 
-int32 <- C_int <- function(length=0) {
-  structure(integer(length), bytes=4L, signed=1L, class=c("Ctype","int"))
+int32 <- C_int <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
+  structure(integer(length), bytes=4L, signed=1L, endian=endian, class=c("Ctype","int"))
 }
 
-int64 <- C_int64 <- function(length=0) {
+int64 <- C_int64 <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
   # currently untested and experimental. Will lose precision in R though we cast
   # to a double precision float to minimize the damage
   if(.Machine$sizeof.long != 8)
     warning("unsupported int64, use int32 or real64")
-  structure(double(length), bytes=as.integer(.Machine$sizeof.long), signed=1L, class=c("Ctype","int64"))
+  structure(double(length), bytes=as.integer(.Machine$sizeof.long), signed=1L, endian=endian, class=c("Ctype","int64"))
 }
 
-uint32 <- C_uint <- function(length=0) {
-  structure(integer(length), bytes=4L, signed=0L, class=c("Ctype","uint"))
+uint32 <- C_uint <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
+  structure(integer(length), bytes=4L, signed=0L, endian=endian, class=c("Ctype","uint"))
 }
 
-real32 <- C_float <- function(length=0) { 
-  structure(double(length),  bytes=4L, signed=1L, class=c("Ctype","float"))
+real32 <- C_float <- function(length=0, endian=c("big", "little", "swap", "platform")) { 
+  endian <- normalize.endianness(match.arg(endian))
+  structure(double(length),  bytes=4L, signed=1L, endian=endian, class=c("Ctype","float"))
 }
 
-real64 <- C_double <- function(length=0) { 
-  structure(double(length),  bytes=8L, signed=1L, class=c("Ctype","double"))
+real64 <- C_double <- function(length=0, endian=c("big", "little", "swap", "platform")) { 
+  endian <- normalize.endianness(match.arg(endian))
+  structure(double(length),  bytes=8L, signed=1L, endian=endian, class=c("Ctype","double"))
 }
 
-cplx <- C_complex <- function(length=0) {
-  structure(complex(length),  bytes=16L, signed=1L, class=c("Ctype","complex"))
+cplx <- C_complex <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
+  structure(complex(length),  bytes=16L, signed=1L, endian=endian, class=c("Ctype","complex"))
 }
 
-bits <- C_bits <- function(length=0) {
-  structure(logical(length), bytes=4L, signed=0L, class=c("Ctype", "bits"))
+bits <- C_bits <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
+  structure(logical(length), bytes=4L, signed=0L, endian=endian, class=c("Ctype", "bits"))
 }
 
-logi32 <- C_logi <- function(length=0) {
-  structure(logical(length), bytes=4L, signed=0L, class=c("Ctype", "logi32"))
+logi32 <- C_logi <- function(length=0, endian=c("big", "little", "swap", "platform")) {
+  endian <- normalize.endianness(match.arg(endian))
+  structure(logical(length), bytes=4L, signed=0L, endian=endian, class=c("Ctype", "logi32"))
 }
 
 logi8 <- C_logi <- function(length=0) {

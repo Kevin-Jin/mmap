@@ -184,7 +184,16 @@ is.mmap <- function(x) {
     j <- 1L
   }
   j <- j[j>0] # only positive values
-  xx <- .Call("mmap_extract", i, as.integer(j), DIM, x, PKG="mmap")
+  swap.byte.order <- FALSE
+  if (is.struct(x$storage.mode)) {
+    swap.byte.order <- logical(length(j))
+    for (fi in 1:length(j))
+      if (!inherits(x$storage.mode[[j[fi]]], "string") && sizeof(x$storage.mode[[j[fi]]]) > 1)
+        swap.byte.order[fi] <- attr(x$storage.mode[[j[fi]]], "endian") != .Platform$endian
+  } else if (!inherits(x$storage.mode, "string") && sizeof(x$storage.mode) > 1) {
+    swap.byte.order <- attr(x$storage.mode, "endian") != .Platform$endian
+  }
+  xx <- .Call("mmap_extract", i, as.integer(j), DIM, x, swap.byte.order, PKG="mmap")
   names(xx) <- names(x$storage.mode)[j]
   if (is.struct(x$storage.mode)) {
     for (fi in 1:length(j))
@@ -193,9 +202,10 @@ is.mmap <- function(x) {
   } else if (inherits(x$storage.mode, "string")) {
     Encoding(xx) <- attr(x$storage.mode, "enc")
   }
-  if(is.null(extractFUN(x))) {
+  if(is.null(extractFUN(x)))
     xx
-  } else as.function(extractFUN(x))(xx)
+  else
+    as.function(extractFUN(x))(xx)
 }
 
 normalize.encoding <- function(x, to) {
@@ -240,16 +250,22 @@ normalize.encoding <- function(x, to) {
 # likely we need to check for list()/struct to correctly handle in C
   if(max(i) > length(x) || min(i) < 0)
     stop("improper 'i' range")
+  swap.byte.order <- FALSE
   if (is.struct(x$storage.mode)) {
     if(length(j) != length(value))
       value <- rep(value, length.out=length(j))
+    swap.byte.order <- logical(length(j))
     for (fi in 1:length(j))
       if (inherits(x$storage.mode[[j[fi]]], "string"))
         value[[fi]] <- normalize.encoding(as.character(value[[fi]]), attr(x$storage.mode[[j[fi]]], "enc"))
+      else if (sizeof(x$storage.mode[[j[fi]]]) > 1)
+        swap.byte.order[fi] <- attr(x$storage.mode[[j[fi]]], "endian") != .Platform$endian
   } else if (inherits(x$storage.mode, "string")) {
     value <- normalize.encoding(value, attr(x$storage.mode, "enc"))
+  } else if (sizeof(x$storage.mode) > 1) {
+    swap.byte.order <- attr(x$storage.mode, "endian") != .Platform$endian
   }
-  .Call("mmap_replace", i, j, value, x, PKG="mmap") 
+  .Call("mmap_replace", i, j, value, x, swap.byte.order, PKG="mmap") 
   if(sync)
     msync(x)
   x
@@ -298,9 +314,10 @@ as.mmap.integer <- function(x,
                             ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
-  if(nbytes == 3) {
-    writeBin(writeBin(x,raw())[1:(length(x)*4) %% 4 != 0], file)
-  } else writeBin(x, file, size=nbytes)
+  if(nbytes == 3)
+    writeBin(writeBin(x,raw())[1:(length(x)*4) %% 4 != 0], file, endian=attr(mode, "endian"))
+  else
+    writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   mmap(file, mode)
 }
 as.mmap.double <- function(x,
@@ -309,7 +326,7 @@ as.mmap.double <- function(x,
                             ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
-  writeBin(x, file, size=nbytes)
+  writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   mmap(file, mode)
 }
 as.mmap.complex <- function(x,
@@ -318,13 +335,13 @@ as.mmap.complex <- function(x,
                             ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
-  writeBin(x, file, size=nbytes)
+  writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   mmap(file, mode)
 }
 
 as.mmap.character <- function(x, 
                               mode=char(sample=x),
-                              file=tempmmap(), force=FALSE, ...) {
+                              file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   payload.cap <- sizeof(mode) - 1
   nas <- is.na(x)

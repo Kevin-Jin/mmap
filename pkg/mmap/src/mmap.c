@@ -15,9 +15,30 @@
 #endif
 #else
 #include <ctype.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <windows.h>
 #undef HAVE_MADVISE
+#endif
+
+/*
+Use the union initializer list hack in the absence of `reinterpret_cast`.
+It is better supported by strict-aliasing compilers than the `*(uint32_t*)&x`
+ hack, despite both having undefined behavior, and it can be done in one line
+ whereas the `*(uint32_t*)&x` hack cannot because we cannot take the address of
+ an rvalue in the manner of `*(typeof(x)*)&__builtin_bswap32(*(uint32_t*)&(x))`.
+*/
+#define swapb16(x) ((union{uint16_t y;typeof(x) z;}){__builtin_bswap16((union{typeof(x) y;uint16_t z;}){x}.z)}.z)
+#define swapb32(x) ((union{uint32_t y;typeof(x) z;}){__builtin_bswap32((union{typeof(x) y;uint32_t z;}){x}.z)}.z)
+#define swapb64(x) ((union{uint64_t y;typeof(x) z;}){__builtin_bswap64((union{typeof(x) y;uint64_t z;}){x}.z)}.z)
+/*
+__builtin_bswap32() and __builtin_bswap64() were defined in GCC 4.2.0 but
+ __builtin_bswap16() wasn't defined until GCC 4.8.0. The earliest supported
+ version of R should be 2.6.0 since it was built with GCC 4.2.1 before moving to
+ GCC 4.5.2 in R 2.12.0 and GCC 4.6.3 in R 2.14.2.
+*/
+#if __GNUC__ < 4 || __GNUC__ == 4 && __GNUC_MINOR__ < 8
+static inline uint16_t __builtin_bswap16(uint16_t x){return(x<<8)|(x>>8);}
 #endif
 
 /*
@@ -41,13 +62,6 @@ raw bytes as returned by mmap into R level SEXP are
 abstracted from the user but handled in the C code.
 At present he may read data as R types: "raw", 
 "integer", and "double".
-
-This library does not support endianess conversion
-yet, or all of the arguments to the underlying
-system calls. The latter is due to the fact that
-not all are mappable in a usable sense into the
-R language, as well as the lack of need for this
-level of control at the current package version.
 
 Future work will entail support for more on-disk
 types converted into R SEXP upon extraction, as well
@@ -349,7 +363,7 @@ SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP prot) {
 }/*}}}*/
 
 /* {{{ mmap_extract */
-SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
+SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_byte_order) {
 /*SEXP mmap_extract (SEXP index, SEXP field, SEXP mmap_obj) {*/
   long v, fi, i, ii, ival;
   int P=0;
@@ -390,9 +404,10 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
     error("invalid mmap pointer");
 
   SEXP dat; /* dat is either a column, or list of columns */
-  if(mode==VECSXP) {
+  if(mode==VECSXP)
     PROTECT(dat = allocVector(VECSXP, length(field)));
-  } else PROTECT(dat = allocVector(mode,LEN));
+  else
+    PROTECT(dat = allocVector(mode,LEN));
   P++;
 
   double *index_p = REAL(index);
@@ -405,6 +420,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
   int fieldCbytes;
   int fieldSigned;
   int offset;
+  int swap;
 
   SEXP vec_dat;  /* need all R types supported: INT/REAL/CPLX/RAW */
   int *int_vec_dat; 
@@ -439,10 +455,13 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           }
           break;
         case sizeof(int): /* logi32 */
+          swap = LOGICAL(swap_byte_order)[0];
           for(i=0;  i < LEN; i++) {
             memcpy(&intbuf, 
                    &(data[((long)index_p[i]-1)*sizeof(int)]),
                    sizeof(char)*sizeof(int));
+            if (swap)
+              intbuf = swapb32(intbuf);
             lgl_dat[i] = intbuf;
           }
           break;
@@ -476,12 +495,13 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
                 continue;
               }
               error("'i=%i' out of bounds", index_p[i]);
-             }
+            }
             int_dat[i] = (int)(unsigned char)(data[((long)index_p[i]-1)]);
           }
         }
         break;
       case 2: /* 2 byte short */
+        swap = LOGICAL(swap_byte_order)[0];
         if(isSigned) {
         /* 
         mmap_ushort_to_int(data, int_dat, index_p, LEN, upper_bound);
@@ -497,6 +517,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           memcpy(&sbuf, 
                  &(data[((long)index_p[i]-1)*sizeof(short)]),
                  sizeof(char)*sizeof(short));
+          if (swap)
+            sbuf = swapb16(sbuf);
           int_dat[i] = (int)sbuf;
         }
         } else {
@@ -511,11 +533,14 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           memcpy(&sbuf,
                  &(data[((long)index_p[i]-1)*sizeof(short)]),
                  sizeof(char)*sizeof(short));
+          if (swap)
+            sbuf = swapb16(sbuf);
           int_dat[i] = (int)(unsigned short)sbuf;
         }  
         }
         break;
       case 3: /* 3 byte int */
+        swap = LOGICAL(swap_byte_order)[0];
         if(isSigned) {
         for(i=0;  i < LEN; i++) {
           ival =  ((long)index_p[i]-1);
@@ -529,6 +554,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           memcpy(&intbuf, 
                  &(data[((long)index_p[i]-1)*3]), /* copy first 3 bytes */
                  3);
+          // TODO: swapb() is ugly in this case. Just delete int24 type instead.
           int_dat[i] = intbuf;
           if(int_dat[i] > 8388607) {  /* MAX 3 byte unsigned INTEGER */
             intbuf = -1;
@@ -551,11 +577,13 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           memcpy(&intbuf, 
                  &(data[((long)index_p[i]-1)*3]), /* copy first 3 bytes */
                  3);
+          // TODO: swapb() is ugly in this case. Just delete int24 type instead.
           int_dat[i] = intbuf;
         }
         }
         break;
       case 4: /* 4 byte int */
+        swap = LOGICAL(swap_byte_order)[0];
         for(i=0;  i < LEN; i++) {
           ival =  ((long)index_p[i]-1);
           if( ival > upper_bound || ival < 0 ) {
@@ -567,6 +595,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           memcpy(&intbuf, 
                  &(data[((long)index_p[i]-1)*sizeof(int)]),
                  sizeof(char)*sizeof(int));
+          if (swap)
+            intbuf = swapb32(intbuf);
           int_dat[i] = intbuf;
         }
         break;
@@ -578,6 +608,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
   case REALSXP: /* {{{ */
     real_dat = REAL(dat);
     upper_bound = (MMAP_SIZE(mmap_obj)-Cbytes)/Cbytes;
+    swap = LOGICAL(swap_byte_order)[0];
     switch(Cbytes) {
       case 4: /* 4 byte float */
         for(i=0;  i < LEN; i++) {
@@ -587,6 +618,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           memcpy(&floatbuf, 
                  &(data[((long)index_p[i]-1)*sizeof(float)]), 
                  sizeof(char)*sizeof(float));
+          if (swap)
+            floatbuf = swapb32(floatbuf);
           real_dat[i] = (double)floatbuf;
         }
         break;
@@ -600,6 +633,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
             memcpy(&longbuf, 
                    &(data[((long)index_p[i]-1)*sizeof(long)]), 
                    sizeof(char)*sizeof(long));
+            if (swap)
+              longbuf = swapb64(longbuf);
             real_dat[i] = (double)longbuf;
           }
         } else {
@@ -610,6 +645,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
           memcpy(&realbuf, 
                  &(data[((long)index_p[i]-1)*sizeof(double)]), 
                  sizeof(char)*sizeof(double));
+          if (swap)
+            realbuf = swapb64(realbuf);
           real_dat[i] = realbuf;
         }
         }
@@ -621,6 +658,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
   case CPLXSXP: /* {{{ */
     complex_dat = COMPLEX(dat);
     upper_bound = (MMAP_SIZE(mmap_obj)-Cbytes)/Cbytes;
+    swap = LOGICAL(swap_byte_order)[0];
     for(i=0;  i < LEN; i++) {
       ival = ((long)index_p[i]-1);
       if( ival > upper_bound || ival < 0 )
@@ -628,6 +666,10 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
       memcpy(&Rcomplexbuf, 
              &(data[((long)index_p[i]-1)*sizeof(Rcomplex)]), 
              sizeof(char)*sizeof(Rcomplex));
+      if (swap) {
+        Rcomplexbuf.r = swapb64(Rcomplexbuf.r);
+        Rcomplexbuf.i = swapb64(Rcomplexbuf.i);
+      }
       complex_dat[i] = Rcomplexbuf;
     }
     break; /* }}} */
@@ -710,11 +752,14 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
             }
             break;
             case sizeof(short):
+            swap = LOGICAL(swap_byte_order)[fi];
             if(fieldSigned) {   /* 2 byte */
             for(ii=0; ii<LEN; ii++) {
               memcpy(&sbuf, 
                      &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                      sizeof(char)*sizeof(short));
+              if (swap)
+                sbuf = swapb16(sbuf);
               int_vec_dat[ii] = (int)sbuf;
             }
             } else {            /* 2 byte unsigned short */
@@ -722,18 +767,20 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
               memcpy(&sbuf, 
                      &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                      sizeof(char)*sizeof(short));
+              if (swap)
+                sbuf = swapb16(sbuf);
               int_vec_dat[ii] = (int)(unsigned short)sbuf;
             }
             }
             break;
-            /*
-            case sizeof( three_byte_int )
-            */
             case sizeof(int): /* 4 byte */
+            swap = LOGICAL(swap_byte_order)[fi];
             for(ii=0; ii<LEN; ii++) {
               memcpy(&intbuf, 
                      &(data[((long)index_p[ii]-1) * Cbytes+offset]),
                      sizeof(char)*sizeof(int));
+              if (swap)
+                intbuf = swapb32(intbuf);
               int_vec_dat[ii] = intbuf;
             }
             break;
@@ -744,12 +791,15 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
         case REALSXP:
           PROTECT(vec_dat = allocVector(REALSXP, LEN));
           real_vec_dat = REAL(vec_dat);
+          swap = LOGICAL(swap_byte_order)[fi];
           switch(fieldCbytes) {
             case sizeof(float): /* 4 byte */
             for(ii=0; ii<LEN; ii++) {
               memcpy(&floatbuf, 
                      &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                      sizeof(char)*sizeof(float));
+              if (swap)
+                floatbuf = swapb32(floatbuf);
               real_vec_dat[ii] = (double)floatbuf;
             }
             break;
@@ -761,6 +811,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
                 memcpy(&longbuf, 
                        &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                        sizeof(char)*sizeof(long));
+                if (swap)
+                  longbuf = swapb64(longbuf);
                 real_vec_dat[ii] = (double)longbuf;
               }
             } else {
@@ -768,6 +820,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
               memcpy(&realbuf, 
                      &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                      sizeof(char)*sizeof(double));
+              if (swap)
+                realbuf = swapb64(realbuf);
               real_vec_dat[ii] = (double)realbuf;
             }
             }
@@ -778,10 +832,15 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
         case CPLXSXP:
           PROTECT(vec_dat = allocVector(CPLXSXP, LEN));
           complex_vec_dat = COMPLEX(vec_dat);
+          swap = LOGICAL(swap_byte_order)[fi];
           for(ii=0; ii<LEN; ii++) {
             memcpy(&Rcomplexbuf, 
                    &(data[((long)index_p[ii]-1) * Cbytes + offset]),
                    sizeof(char)*sizeof(Rcomplex));
+            if (swap) {
+              Rcomplexbuf.r = swapb64(Rcomplexbuf.r);
+              Rcomplexbuf.i = swapb64(Rcomplexbuf.i);
+            }
             complex_vec_dat[ii] = Rcomplexbuf;
           }
           SET_VECTOR_ELT(dat, fi, vec_dat);
@@ -833,7 +892,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj) {
 }/*}}}*/
 
 /* mmap_replace {{{ */
-SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
+SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_byte_order) {
 /*  int i, upper_bound, ival; */
   int i;
   size_t upper_bound, ival;
@@ -843,6 +902,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
   int mode = MMAP_MODE(mmap_obj);
   int Cbytes = MMAP_CBYTES(mmap_obj);
   int hasnul;
+  int swap;
   /*int isSigned = MMAP_SIGNED(mmap_obj);*/
   int P=0;
 
@@ -854,8 +914,11 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
   double        *real_value;
   unsigned char *byte_value;
   Rcomplex      *complex_value;
+  Rcomplex      Rcomplexbuf;
+  double        realbuf;
   float         float_value;
   short         short_value;
+  int           intbuf;
   long          long_value;
   char          char_value;
   SEXP          string_value;
@@ -896,12 +959,15 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
         }
         break;
       case sizeof(int): /* logi32 */
+        swap = LOGICAL(swap_byte_order)[0];
         for(i=0; i < LEN; i++) {
           ival = ((long)index_p[i]-1)*sizeof(int);
           if( ival > upper_bound || ival < 0 )
             error("'i=%i' out of bounds", index_p[i]);
-          /* endianess issues are here -- FIXME */
-          memcpy(&(data[((long)index_p[i]-1)*sizeof(int)]), &(lgl_value[i]), sizeof(int));
+          intbuf = lgl_value[i];
+          if (swap)
+            intbuf = swapb32(intbuf);
+          memcpy(&(data[((long)index_p[i]-1)*sizeof(int)]), &(intbuf), sizeof(int));
         }
         break;
       default:
@@ -924,28 +990,37 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
         }
       break;
       case sizeof(short): /* 2 byte short */
+        swap = LOGICAL(swap_byte_order)[0];
         for(i=0;  i < LEN; i++) {
           ival = ((long)index_p[i]-1)*sizeof(short);
           if( ival > upper_bound || ival < 0 )
             error("'i=%i' out of bounds", index_p[i]);
-          short_value = (unsigned short)(int_value[i]); 
+          short_value = (unsigned short)(int_value[i]);
+          if (swap)
+            short_value = swapb16(short_value);
           memcpy(&(data[((long)index_p[i]-1)*sizeof(short)]), &(short_value), sizeof(short));
         }
       break;
       case 3: /* case 3 byte */
+      swap = LOGICAL(swap_byte_order)[0];
       for(i=0;  i < LEN; i++) {
         ival = ((long)index_p[i]-1)*3;
         if( ival > upper_bound || ival < 0 )
           error("'i=%i' out of bounds", index_p[i]);
+        // TODO: swapb() is ugly in this case. Just delete int24 type instead.
         memcpy(&(data[((long)index_p[i]-1)*3]), &(int_value[i]), 3);
       }
       break;
       case sizeof(int): /* 4 byte int */
+        swap = LOGICAL(swap_byte_order)[0];
         for(i=0;  i < LEN; i++) {
           ival = ((long)index_p[i]-1)*sizeof(int);
           if( ival > upper_bound || ival < 0 )
             error("'i=%i' out of bounds", index_p[i]);
-          memcpy(&(data[((long)index_p[i]-1)*sizeof(int)]), &(int_value[i]), sizeof(int));
+          intbuf = int_value[i];
+          if (swap)
+            intbuf = swapb32(intbuf); 
+          memcpy(&(data[((long)index_p[i]-1)*sizeof(int)]), &(intbuf), sizeof(int));
         }
         break;
     }
@@ -953,6 +1028,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
   case REALSXP: /* {{{ */
     real_value = REAL(value);
     upper_bound = (MMAP_SIZE(mmap_obj)-Cbytes);
+    swap = LOGICAL(swap_byte_order)[0];
     switch(Cbytes) {
       case sizeof(float): /* 4 byte float */
       for(i=0;  i < LEN; i++) {
@@ -960,6 +1036,8 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
         if( ival > upper_bound || ival < 0 )
           error("'i=%i' out of bounds", i);
         float_value = (float)(real_value[i]);
+        if (swap)
+          float_value = swapb32(float_value);
         memcpy(&(data[((long)index_p[i]-1)*sizeof(float)]), &(float_value), sizeof(float));
       }
       break;
@@ -970,6 +1048,8 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
         if( ival > upper_bound || ival < 0 )
           error("'i=%i' out of bounds", i);
         long_value = (long)(real_value[i]);
+        if (swap)
+          long_value = swapb64(long_value);
         memcpy(&(data[((long)index_p[i]-1)*sizeof(long)]), &(long_value), sizeof(long));
       }
       } else {
@@ -977,7 +1057,10 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
         ival =  ((long)index_p[i]-1)*sizeof(double);
         if( ival > upper_bound || ival < 0 )
           error("'i=%i' out of bounds", i);
-        memcpy(&(data[((long)index_p[i]-1)*sizeof(double)]), &(real_value[i]), sizeof(double));
+        realbuf = real_value[i];
+        if (swap)
+          realbuf = swapb64(realbuf);
+        memcpy(&(data[((long)index_p[i]-1)*sizeof(double)]), &(realbuf), sizeof(double));
       }
       }
       break;
@@ -999,7 +1082,8 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
           /* make sure we have an int for value */
           if(TYPEOF(VECTOR_ELT(value, fi)) != INTSXP)
             int_value = INTEGER(coerceVector(VECTOR_ELT(value, fi), INTSXP));
-          else int_value = INTEGER(VECTOR_ELT(value, fi));
+          else
+            int_value = INTEGER(VECTOR_ELT(value, fi));
 
           switch(fieldCbytes) {
             case sizeof(char): /* 1 byte char */
@@ -1016,9 +1100,12 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
             }
             break;
             case sizeof(short):
+            swap = LOGICAL(swap_byte_order)[fi];
             if(fieldSigned) {
               for(i=0; i < LEN; i++) {
                 short_value = (short)(int_value[i]);
+                if (swap)
+                  short_value = swapb16(short_value);
                 memcpy(&(data[((long)index_p[i]-1)*Cbytes+offset]),
                        &short_value,
                        fieldCbytes);
@@ -1026,6 +1113,8 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
             } else {
               for(i=0; i < LEN; i++) {
                 short_value = (unsigned short)(int_value[i]);
+                if (swap)
+                  short_value = swapb16(short_value);
                 memcpy(&(data[((long)index_p[i]-1)*Cbytes+offset]),
                        &short_value,
                        fieldCbytes);
@@ -1033,9 +1122,13 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
             }
             break;
             case sizeof(int):
+              swap = LOGICAL(swap_byte_order)[fi];
               for(i=0; i < LEN; i++) {
+                intbuf = int_value[i];
+                if (swap)
+                  intbuf = swapb32(intbuf);
                 memcpy(&(data[((long)index_p[i]-1)*Cbytes+offset]),
-                       &(int_value[i]),
+                       &intbuf,
                        sizeof(int));
               }
             break;
@@ -1045,11 +1138,15 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
           LEN = length(VECTOR_ELT(value,fi));
           if(TYPEOF(VECTOR_ELT(value, fi)) != REALSXP)
             real_value = REAL(coerceVector(VECTOR_ELT(value, fi), REALSXP));
-          else real_value = REAL(VECTOR_ELT(value, fi));
+          else
+            real_value = REAL(VECTOR_ELT(value, fi));
+          swap = LOGICAL(swap_byte_order)[fi];
           switch(fieldCbytes) {
             case sizeof(float):
             for(i=0; i < LEN; i++) {
               float_value = (float)(real_value[i]);
+              if (swap)
+                float_value = swapb32(float_value);
               memcpy(&(data[((long)index_p[i]-1)*Cbytes+offset]),
                      &float_value,
                      sizeof(float));
@@ -1057,9 +1154,12 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
             break;
           case sizeof(double):
             for(i=0; i < LEN; i++) {
+              realbuf = real_value[i];
+              if (swap)
+                realbuf = swapb64(realbuf);
               memcpy(&(data[((long)index_p[i]-1)*Cbytes+offset]),
                      /*&(REAL(VECTOR_ELT(value,v))[i]),*/
-                     &(real_value[i]),
+                     &realbuf,
                      sizeof(double));
             }
             break;
@@ -1070,7 +1170,8 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
           /* make sure we have an raw for value */
           if(TYPEOF(VECTOR_ELT(value, fi)) != RAWSXP)
             byte_value = RAW(coerceVector(VECTOR_ELT(value, fi), RAWSXP));
-          else byte_value = RAW(VECTOR_ELT(value, fi));
+          else
+            byte_value = RAW(VECTOR_ELT(value, fi));
 
           for(i=0;  i < LEN; i++) {
               /*
@@ -1141,8 +1242,14 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj) {
     break;
   case CPLXSXP:
     complex_value = COMPLEX(value);
+    swap = LOGICAL(swap_byte_order)[0];
     for(i=0; i < LEN; i++) {
-      memcpy(&(data[((long)index_p[i]-1)*sizeof(Rcomplex)]), &(complex_value[i]), sizeof(Rcomplex));
+      Rcomplexbuf = complex_value[i];
+      if (swap) {
+        Rcomplexbuf.r = swapb64(Rcomplexbuf.r);
+        Rcomplexbuf.i = swapb64(Rcomplexbuf.i);
+      }
+      memcpy(&(data[((long)index_p[i]-1)*sizeof(Rcomplex)]), &Rcomplexbuf, sizeof(Rcomplex));
     }
     break;
   default:
