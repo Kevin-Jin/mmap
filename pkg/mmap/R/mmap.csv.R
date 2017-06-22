@@ -18,7 +18,7 @@ function (file, header = TRUE, sep = ",", quote = "\"", dec = ".",
     tmplist[[col]] <- as.mmap(clm[,1], force=TRUE) 
   }
   stype <- do.call(struct,lapply(tmplist, function(X) X$storage.mode))
-  totalsize <- sum(sapply(tmplist, nbytes))
+  totalsize <- sum(sapply(tmplist, sizeof))
   tmpstruct <- tempfile()
   writeBin(raw(totalsize), tmpstruct)
   tmpstruct <- mmap(tmpstruct, stype)
