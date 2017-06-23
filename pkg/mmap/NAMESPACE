@@ -17,8 +17,8 @@ export(
        extractFUN, "extractFUN<-",
        replaceFUN, "replaceFUN<-",
 
-       bits,  # not yet implemented
-       logi8, logi32,
+       bitset,  # not yet implemented
+       bool8, bool32,
        char,  int8,  int16,  int32,  
        uchar, uint8, uint16, int64,
        real32, real64,
@@ -31,6 +31,7 @@ export(
 
        as.Ctype,
        is.Ctype,
+       get.Ctype,
 
        dim.mmap, "dim<-.mmap",
        dimnames.mmap, "dimnames<-.mmap",
@@ -85,6 +86,8 @@ S3method(as.int8, mmap)
 S3method(as.uint8, mmap)
 S3method(as.int16, mmap)
 S3method(as.uint16, mmap)
+
+S3method(get.Ctype, Ctype)
 
 S3method(sizeof, default)
 S3method(sizeof, Ctype)

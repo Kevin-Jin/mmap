@@ -71,7 +71,7 @@ Comments, criticisms, and concerns should be directed
 to the maintainer of the package.
 */
 
-/* initialize bitmask for bits() type {{{*/
+/* initialize bitmask for bitset() type {{{*/
 int bitmask[32];
 int nbitmask[32];
 
@@ -424,7 +424,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
   switch(mode) {
   case LGLSXP: /* {{{ */
     /* FIXME Need bound checking */
-    if( strcmp(MMAP_CTYPE(mmap_obj), "bits") == 0) { /* bits */
+    if( strcmp(MMAP_CTYPE(mmap_obj), "bitset") == 0) { /* bitset */
       lgl_dat = LOGICAL(dat);
       for(i=0;  i < LEN; i++) {
         long which_word = (long) ((long)(index_p[i]-1)/32);
@@ -440,12 +440,12 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     } else {
       lgl_dat = LOGICAL(dat);
       switch(Cbytes) {
-        case sizeof(char): /* logi8 */
+        case sizeof(char): /* bool8 */
           for(i=0;  i < LEN; i++) {
             lgl_dat[i] = (int)(unsigned char)(data[((long)index_p[i]-1)]);
           }
           break;
-        case sizeof(int): /* logi32 */
+        case sizeof(int): /* bool32 */
           swap = LOGICAL(swap_byte_order)[0];
           for(i=0;  i < LEN; i++) {
             memcpy(&intbuf, 
@@ -752,8 +752,9 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
             }
             break;
             case sizeof(double): /* 8 byte */
+            /* get.Ctype() */
             if( strcmp(CHAR(STRING_ELT(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj), v),
-                                                 R_ClassSymbol),1)),"int64") == 0) { 
+                                                 R_ClassSymbol),0)),"int64") == 0) { 
               /* casting from int64 to R double to minimize precision loss */
               for(ii=0;  ii < LEN; ii++) {
                 memcpy(&longbuf, 
@@ -884,7 +885,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
   case LGLSXP:
     lgl_value = LOGICAL(value);
     upper_bound = (MMAP_SIZE(mmap_obj)-Cbytes); 
-    if( strcmp(MMAP_CTYPE(mmap_obj), "bits") == 0) {  /* bits() */
+    if( strcmp(MMAP_CTYPE(mmap_obj), "bitset") == 0) {  /* bitset() */
       for(i=0; i < LEN; i++) {
         which_word = (long) (((long)index_p[i]-1)/32);
         memcpy(&int_buf, &(data[which_word]), sizeof(int));
@@ -897,7 +898,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
       }
     } else {
     switch(Cbytes) {
-      case sizeof(char): /* logi8 */
+      case sizeof(char): /* bool8 */
         for(i=0; i < LEN; i++) {
           ival = ((long)index_p[i]-1)*sizeof(char);
           if( ival > upper_bound || ival < 0 )
@@ -906,7 +907,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
           memcpy(&(data[((long)index_p[i]-1)*sizeof(char)]), &(char_value), sizeof(char));
         }
         break;
-      case sizeof(int): /* logi32 */
+      case sizeof(int): /* bool32 */
         swap = LOGICAL(swap_byte_order)[0];
         for(i=0; i < LEN; i++) {
           ival = ((long)index_p[i]-1)*sizeof(int);
@@ -1244,7 +1245,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
   switch(mode) {
   case LGLSXP:
     cmp_to_int = INTEGER(coerceVector(compare_to,INTSXP))[0];
-    /* bits, lgl8, lgl32 */
+    /* bitset, bool8, bool32 */
     switch(Cbytes) {
       case sizeof(char):
         if(cmp_how==1) {

@@ -77,10 +77,10 @@ print.mmap <- function(x, ...) {
               }
   }
   if( !is.null(x$dim)) { # has dim
-  cat(paste("<mmap:",file_name,">  (",class(x$storage.mode)[2],") ",
+  cat(paste("<mmap:",file_name,">  (",get.Ctype(x$storage.mode),") ",
             type_name," [1:", nrow(x),", 1:", ncol(x),"]",sep=""),firstN,"...\n")
   } else {
-  cat(paste("<mmap:",file_name,">  (",class(x$storage.mode)[2],") ",
+  cat(paste("<mmap:",file_name,">  (",get.Ctype(x$storage.mode),") ",
             type_name," [1:", length(x),"]",sep=""),firstN,"...\n")
   }
 }
@@ -274,7 +274,7 @@ normalize.encoding <- function(x, to) {
 length.mmap <- function(x) {
   size_in_bytes <- sizeof(x)
   size <- sizeof(x$storage.mode)
-  if( class(x$storage.mode)[2] == 'bits')
+  if( get.Ctype(x$storage.mode) == "bitset")
     trunc(size_in_bytes/size) * 32L
   else
     trunc(size_in_bytes/size)
