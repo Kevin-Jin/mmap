@@ -371,9 +371,9 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
 
   PROTECT(index = coerceVector(index,REALSXP)); P++;
   int LEN = length(index);  
-  int mode = MMAP_MODE(mmap_obj);
-  int Cbytes = MMAP_CBYTES(mmap_obj);
-  int isSigned = MMAP_SIGNED(mmap_obj);
+  int mode = TYPEOF(MMAP_SMODE(mmap_obj));
+  int Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  int isSigned = SMODE_SIGNED(MMAP_SMODE(mmap_obj));
 
   /* types to hold memcpy of raw bytes to avoid punning */
   short sbuf;
@@ -424,7 +424,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
   switch(mode) {
   case LGLSXP: /* {{{ */
     /* FIXME Need bound checking */
-    if( strcmp(MMAP_CTYPE(mmap_obj), "bitset") == 0) { /* bitset */
+    if( strcmp(SMODE_CTYPE(MMAP_SMODE(mmap_obj)), "bitset") == 0) { /* bitset */
       lgl_dat = LOGICAL(dat);
       for(i=0;  i < LEN; i++) {
         long which_word = (long) ((long)(index_p[i]-1)/32);
@@ -572,7 +572,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
         }
         break;
       case 8: /* 8 byte double or (double)int64 */
-        if( strcmp(MMAP_CTYPE(mmap_obj), "int64") == 0) {
+        if( strcmp(SMODE_CTYPE(MMAP_SMODE(mmap_obj)), "int64") == 0) {
           /* casting from int64 to R double to minimize precision loss */
           for(i=0;  i < LEN; i++) {
             ival = ((long)index_p[i]-1);
@@ -622,8 +622,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     }
     break; /* }}} */
   case STRSXP: /* {{{ */
-    hasnul = !!(isNull(getAttrib(MMAP_SMODE(mmap_obj),install("nul")))
-                  || asLogical(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))));
+    hasnul = !!SMODE_NUL_TERM(MMAP_SMODE(mmap_obj));
     if(hasnul) { 
       for(i=0; i < LEN; i++) {
         str = (char *)(&(data[((long)index_p[i]-1)*Cbytes]));
@@ -654,7 +653,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     ////byte_buf = RAW(byteBuf);
     /* extract_struct:
       
-       - bytes in struct from MMAP_CBYTES
+       - bytes in struct from SMODE_CBYTES(MMAP_SMODE(mmap_obj))
        - loop through all `i` memcpy struct to byte array
        - loop through VECSXP;
            test for TYPEOF
@@ -678,11 +677,9 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     ////}  
     for(fi=0; fi<length(field); fi++) {
       v = INTEGER(field)[fi]-1;
-      offset = MMAP_OFFSET(mmap_obj,v);
-      fieldCbytes = INTEGER(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),
-                                      v),install("bytes")))[0];
-      fieldSigned = INTEGER(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),
-                                      v),install("signed")))[0];
+      offset = SMODE_OFFSET(MMAP_SMODE(mmap_obj),v);
+      fieldCbytes = SMODE_CBYTES(VECTOR_ELT(MMAP_SMODE(mmap_obj), v));
+      fieldSigned = SMODE_SIGNED(VECTOR_ELT(MMAP_SMODE(mmap_obj), v));
       switch(TYPEOF(VECTOR_ELT(MMAP_SMODE(mmap_obj), v))) {
         case INTSXP:
           PROTECT(vec_dat = allocVector(INTSXP, LEN)); 
@@ -752,9 +749,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
             }
             break;
             case sizeof(double): /* 8 byte */
-            /* get.Ctype() */
-            if( strcmp(CHAR(STRING_ELT(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj), v),
-                                                 R_ClassSymbol),0)),"int64") == 0) { 
+            if( strcmp(SMODE_CTYPE(VECTOR_ELT(MMAP_SMODE(mmap_obj), v)),"int64") == 0) { 
               /* casting from int64 to R double to minimize precision loss */
               for(ii=0;  ii < LEN; ii++) {
                 memcpy(&longbuf, 
@@ -805,8 +800,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
           UNPROTECT(1);
           break;
         case STRSXP:
-          hasnul = !!(isNull(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),install("nul")))
-                        || asLogical(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),install("nul"))));
+          hasnul = !!SMODE_NUL_TERM(VECTOR_ELT(MMAP_SMODE(mmap_obj),v));
           PROTECT(vec_dat = allocVector(STRSXP, LEN));
           if(hasnul) {
             for(ii=0; ii < LEN; ii++) {
@@ -848,11 +842,10 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
   int v, fi, offset, fieldCbytes, fieldSigned;
   char *data;
   int LEN = length(index);  
-  int mode = MMAP_MODE(mmap_obj);
-  int Cbytes = MMAP_CBYTES(mmap_obj);
+  int mode = TYPEOF(MMAP_SMODE(mmap_obj));
+  int Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
   int hasnul;
   int swap;
-  /*int isSigned = MMAP_SIGNED(mmap_obj);*/
   int P=0;
 
   if((data = MMAP_DATA(mmap_obj)) == NULL)
@@ -885,7 +878,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
   case LGLSXP:
     lgl_value = LOGICAL(value);
     upper_bound = (MMAP_SIZE(mmap_obj)-Cbytes); 
-    if( strcmp(MMAP_CTYPE(mmap_obj), "bitset") == 0) {  /* bitset() */
+    if( strcmp(SMODE_CTYPE(MMAP_SMODE(mmap_obj)), "bitset") == 0) {  /* bitset() */
       for(i=0; i < LEN; i++) {
         which_word = (long) (((long)index_p[i]-1)/32);
         memcpy(&int_buf, &(data[which_word]), sizeof(int));
@@ -981,7 +974,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
       }
       break;
       case sizeof(double): /* 8 byte double */
-      if( strcmp(MMAP_CTYPE(mmap_obj), "int64") == 0) { /* stored as long */
+      if( strcmp(SMODE_CTYPE(MMAP_SMODE(mmap_obj)), "int64") == 0) { /* stored as long */
       for(i=0;  i < LEN; i++) {
         ival =  ((long)index_p[i]-1)*sizeof(double);
         if( ival > upper_bound || ival < 0 )
@@ -1010,11 +1003,9 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
       error("size of struct and size of replacement value do not match");
     for(fi=0; fi<length(field); fi++) {
       v = INTEGER(field)[fi]-1;
-      offset = MMAP_OFFSET(mmap_obj, v);  /* byte offset of column */
-      fieldCbytes = INTEGER(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),
-                                      install("bytes")))[0];
-      fieldSigned = INTEGER(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),
-                                      install("signed")))[0];
+      offset = SMODE_OFFSET(MMAP_SMODE(mmap_obj),v);  /* byte offset of column */
+      fieldCbytes = SMODE_CBYTES(VECTOR_ELT(MMAP_SMODE(mmap_obj),v));
+      fieldSigned = SMODE_SIGNED(VECTOR_ELT(MMAP_SMODE(mmap_obj),v));
       switch(TYPEOF(VECTOR_ELT(MMAP_SMODE(mmap_obj),v))) {
         case INTSXP:
           LEN = length(VECTOR_ELT(value,fi));
@@ -1125,8 +1116,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
           }
           break;
         case STRSXP:
-          hasnul = !!(isNull(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),install("nul")))
-                        || asLogical(getAttrib(VECTOR_ELT(MMAP_SMODE(mmap_obj),v),install("nul"))));
+          hasnul = !!SMODE_NUL_TERM(VECTOR_ELT(MMAP_SMODE(mmap_obj),v));
           LEN = length(VECTOR_ELT(value, fi));
           PROTECT(string_value = VECTOR_ELT(value, fi));
           for(i=0; i < LEN; i++) {
@@ -1154,8 +1144,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
     break;
   case STRSXP:
     // 0 if explicitly told that null-terminating character is unnecessary, 1 otherwise.
-    hasnul = !!(isNull(getAttrib(MMAP_SMODE(mmap_obj),install("nul")))
-                  || asLogical(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))));
+    hasnul = !!SMODE_NUL_TERM(MMAP_SMODE(mmap_obj));
     for(i=0; i < LEN; i++) {
       memset(&(data[((long)index_p[i]-1)*Cbytes]), '\0', Cbytes);
       // strnlen(CHAR(STRING_ELT(value, i)), Cbytes) is definitely O(n).
@@ -1211,9 +1200,9 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
   double realbuf;
 
   long LEN;
-  int mode = MMAP_MODE(mmap_obj); 
-  int Cbytes = MMAP_CBYTES(mmap_obj);
-  int isSigned = MMAP_SIGNED(mmap_obj);
+  int mode = TYPEOF(MMAP_SMODE(mmap_obj)); 
+  int Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  int isSigned = SMODE_SIGNED(MMAP_SMODE(mmap_obj));
 
   SEXP result;
   LEN = (long)(MMAP_SIZE(mmap_obj)/Cbytes);  /* change to REAL */
@@ -1702,8 +1691,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     char *str;
     int str_len;
     char *str_buf = R_alloc(sizeof(char), Cbytes);
-    int hasnul = !!(isNull(getAttrib(MMAP_SMODE(mmap_obj), install("nul")))
-                      || asLogical(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))));
+    int hasnul = !!SMODE_NUL_TERM(MMAP_SMODE(mmap_obj));
     if(hasnul) {
       for(i=0; i < LEN; i++) {
         str = &(data[i*Cbytes]);
