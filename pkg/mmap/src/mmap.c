@@ -365,15 +365,16 @@ SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP prot) {
 /* {{{ mmap_extract */
 SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_byte_order) {
 /*SEXP mmap_extract (SEXP index, SEXP field, SEXP mmap_obj) {*/
-  long v, fi, i, ii, ival;
+  long u, v, fi, i;
   int P=0;
   unsigned char *data; /* unsigned int and values */
 
-  PROTECT(index = coerceVector(index,REALSXP)); P++;
+  PROTECT(index = coerceVector(index, INTSXP)); P++;
+  SEXP vec_smode, smode = MMAP_SMODE(mmap_obj);
   int LEN = length(index);  
-  int mode = TYPEOF(MMAP_SMODE(mmap_obj));
-  int Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
-  int isSigned = SMODE_SIGNED(MMAP_SMODE(mmap_obj));
+  int mode = TYPEOF(smode);
+  int Cbytes = SMODE_CBYTES(smode);
+  int mmap_len = MMAP_SIZE(mmap_obj) / SMODE_CBYTES(smode); /* length.mmap() */
 
   /* types to hold memcpy of raw bytes to avoid punning */
   short sbuf;
@@ -383,7 +384,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
   double realbuf;
   Rcomplex Rcomplexbuf; 
 
-  SEXP byteBuf;
+  //SEXP byteBuf;
   int *int_dat;
   int *lgl_dat;
   double *real_dat;
@@ -401,57 +402,62 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     PROTECT(dat = allocVector(mode,LEN));
   P++;
 
-  double *index_p = REAL(index);
-  long upper_bound;
+  int *index_p = INTEGER(index);
 
   /* need R typed storage for structures... 
      ideally we needn't alloc for types
      that are not used --- move alloc to do that */
   int hasnul;
   int fieldCbytes;
-  int fieldSigned;
   int offset;
   int swap;
 
   SEXP vec_dat;  /* need all R types supported: INT/REAL/CPLX/RAW */
-  int *int_vec_dat; 
-  double *real_vec_dat;
   char *str;  /* temp store for string cp */
-  Rcomplex *complex_vec_dat;
-  Rbyte *raw_vec_dat;
 
+  div_t word;
 
   switch(mode) {
   case LGLSXP: /* {{{ */
-    /* FIXME Need bound checking */
-    if( strcmp(SMODE_CTYPE(MMAP_SMODE(mmap_obj)), "bitset") == 0) { /* bitset */
-      lgl_dat = LOGICAL(dat);
-      for(i=0;  i < LEN; i++) {
-        long which_word = (long) ((long)(index_p[i]-1)/32);
-        memcpy(&intbuf, 
-               &(data[which_word]),
-               sizeof(char)*sizeof(int));
-        lgl_dat[i] = intbuf;
-        if(lgl_dat[i] & bitmask[ ((long)index_p[i]-1 )-(which_word*32) ])
-          lgl_dat[i] = 1;
-        else
-          lgl_dat[i] = 0;
+    swap = asLogical(swap_byte_order);
+    
+    lgl_dat = LOGICAL(dat);
+    if(strcmp(SMODE_CTYPE(smode), "bitset") == 0) { /* bitset */
+      for(i = 0; i < LEN; i++) {
+        u = index_p[i]-1;
+        if(u >= mmap_len || u < 0)
+          error("'i=%i' out of bounds", u+1);
+        
+        // word.quot == u / 32 && word.rem == u % 32.
+        word = div(u, 32);
+        memcpy(&intbuf, &data[word.quot*Cbytes+0], sizeof(int32_t));
+        // Endianness takes on a very convoluted meaning here. Still, this should
+        //  be portable as long as we are consistent in using 32-bit chunks.
+        if(swap)
+          intbuf = swapb32(intbuf);
+        lgl_dat[i] = !!(intbuf & bitmask[word.rem]);
       }
     } else {
-      lgl_dat = LOGICAL(dat);
-      switch(Cbytes) {
-        case sizeof(char): /* bool8 */
-          for(i=0;  i < LEN; i++) {
-            lgl_dat[i] = (int)(unsigned char)(data[((long)index_p[i]-1)]);
+      switch(SMODE_CBYTES(smode)) {
+        case 1: /* bool8 */
+          for(i = 0; i < LEN; i++) {
+            u = index_p[i]-1;
+            if(u >= mmap_len || u < 0)
+              error("'i=%i' out of bounds", u+1);
+            
+            lgl_dat[i] = data[u*Cbytes+0];
           }
           break;
-        case sizeof(int): /* bool32 */
-          swap = LOGICAL(swap_byte_order)[0];
-          for(i=0;  i < LEN; i++) {
-            memcpy(&intbuf, 
-                   &(data[((long)index_p[i]-1)*sizeof(int)]),
-                   sizeof(char)*sizeof(int));
-            if (swap)
+        case 4: /* bool32 */
+          for(i = 0; i < LEN; i++) {
+            u = index_p[i]-1;
+            if(u >= mmap_len || u < 0)
+              error("'i=%i' out of bounds", u+1);
+            
+            memcpy(&intbuf,
+                   &data[u*Cbytes+0],
+                   sizeof(int32_t));
+            if(swap)
               intbuf = swapb32(intbuf);
             lgl_dat[i] = intbuf;
           }
@@ -463,89 +469,70 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     }
     break; /* }}} */
   case INTSXP: /* {{{ */
+    swap = asLogical(swap_byte_order);
+    
     int_dat = INTEGER(dat);
-    upper_bound = (MMAP_SIZE(mmap_obj)-Cbytes)/Cbytes;
-    switch(Cbytes) {
-      case 1: /* 1 byte (signed) char */
-        if(isSigned) {
-          for(i=0;  i < LEN; i++) {
-            ival = ((long)index_p[i]-1);
-            if( ival > upper_bound || ival < 0 ) {
-              if( ival == 0 ) {
-                continue;
-              }
-              error("'i=%i' out of bounds", index_p[i]);
-            }
-            int_dat[i] = (int)(char)(data[((long)index_p[i]-1)]);
+    switch(SMODE_CBYTES(smode)) {
+      case 1:
+        if(SMODE_SIGNED(smode)) { /* int8 */
+          for(i = 0; i < LEN; i++) {
+            u = index_p[i]-1;
+            if(u >= mmap_len || u < 0)
+              error("'i=%i' out of bounds", u+1);
+            
+            int_dat[i] = (int8_t)data[u*Cbytes+0];
           }
-        } else { /* unsigned */
-          for(i=0;  i < LEN; i++) {
-            ival = ((long)index_p[i]-1);
-            if( ival > upper_bound || ival < 0 ) {
-              if( ival == 0 ) {
-                continue;
-              }
-              error("'i=%i' out of bounds", index_p[i]);
-            }
-            int_dat[i] = (int)(unsigned char)(data[((long)index_p[i]-1)]);
+        } else { /* uint8 */
+          for(i = 0; i < LEN; i++) {
+            u = index_p[i]-1;
+            if(u >= mmap_len || u < 0)
+              error("'i=%i' out of bounds", u+1);
+            
+            int_dat[i] = (uint8_t)data[u*Cbytes+0];
           }
         }
         break;
-      case 2: /* 2 byte short */
-        swap = LOGICAL(swap_byte_order)[0];
-        if(isSigned) {
-        /* 
-        mmap_ushort_to_int(data, int_dat, index_p, LEN, upper_bound);
-        */
-        for(i=0;  i < LEN; i++) {
-          ival = ((long)index_p[i]-1);
-          if( ival > upper_bound || ival < 0 ) {
-            if( ival == 0 ) {
-              continue;
-            }
-            error("'i=%i' out of bounds", index_p[i]);
-          }
-          memcpy(&sbuf, 
-                 &(data[((long)index_p[i]-1)*sizeof(short)]),
-                 sizeof(char)*sizeof(short));
-          if (swap)
-            sbuf = swapb16(sbuf);
-          int_dat[i] = (int)sbuf;
-        }
-        } else {
-        for(i=0;  i < LEN; i++) {
-          ival = ((long)index_p[i]-1);
-          if( ival > upper_bound || ival < 0 ) {
-            if( ival == 0 ) {
-              continue;
-            }
-            error("'i=%i' out of bounds", index_p[i]);
-          }
+      case 2:
+        if(SMODE_SIGNED(smode)) { /* int16 */
+        for(i = 0; i < LEN; i++) {
+          u = index_p[i]-1;
+          if(u >= mmap_len || u < 0)
+            error("'i=%i' out of bounds", u+1);
+          
           memcpy(&sbuf,
-                 &(data[((long)index_p[i]-1)*sizeof(short)]),
-                 sizeof(char)*sizeof(short));
-          if (swap)
+                 &data[u*Cbytes+0],
+                 sizeof(int16_t));
+          if(swap)
             sbuf = swapb16(sbuf);
-          int_dat[i] = (int)(unsigned short)sbuf;
+          int_dat[i] = (int16_t)sbuf;
+        }
+        } else { /* uint16 */
+        for(i = 0; i < LEN; i++) {
+          u = index_p[i]-1;
+          if(u >= mmap_len || u < 0)
+            error("'i=%i' out of bounds", u+1);
+          
+          memcpy(&sbuf,
+                 &data[u*Cbytes+0],
+                 sizeof(uint16_t));
+          if(swap)
+            sbuf = swapb16(sbuf);
+          int_dat[i] = (uint16_t)sbuf;
         }  
         }
         break;
-      case 4: /* 4 byte int */
-        swap = LOGICAL(swap_byte_order)[0];
-        for(i=0;  i < LEN; i++) {
-          ival =  ((long)index_p[i]-1);
-          if( ival > upper_bound || ival < 0 ) {
-            if( ival == 0 ) {
-              continue;
-            }
-            error("'i=%i' out of bounds", index_p[i]);
-          }
-          memcpy(&intbuf, 
-                 &(data[((long)index_p[i]-1)*sizeof(int)]),
-                 sizeof(char)*sizeof(int));
-          if (swap)
+      case 4: /* int32 */
+        for(i = 0; i < LEN; i++) {
+          u = index_p[i]-1;
+          if(u >= mmap_len || u < 0)
+            error("'i=%i' out of bounds", u+1);
+          
+          memcpy(&intbuf,
+                 &data[u*Cbytes+0],
+                 sizeof(int32_t));
+          if(swap)
             intbuf = swapb32(intbuf);
-          int_dat[i] = intbuf;
+          int_dat[i] = (int32_t)intbuf;
         }
         break;
       default:
@@ -554,46 +541,49 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     }
     break; /* }}} */
   case REALSXP: /* {{{ */
+    swap = asLogical(swap_byte_order);
+    
     real_dat = REAL(dat);
-    upper_bound = (MMAP_SIZE(mmap_obj)-Cbytes)/Cbytes;
-    swap = LOGICAL(swap_byte_order)[0];
-    switch(Cbytes) {
-      case 4: /* 4 byte float */
-        for(i=0;  i < LEN; i++) {
-          ival = ((long)index_p[i]-1);
-          if( ival > upper_bound || ival < 0 )
-            error("'i=%i' out of bounds", index_p[i]);
+    switch(SMODE_CBYTES(smode)) {
+      case 4: /* float */
+        for(i = 0; i < LEN; i++) {
+          u = index_p[i]-1;
+          if(u >= mmap_len || u < 0)
+            error("'i=%i' out of bounds", u+1);
+          
           memcpy(&floatbuf, 
-                 &(data[((long)index_p[i]-1)*sizeof(float)]), 
-                 sizeof(char)*sizeof(float));
-          if (swap)
+                 &data[u*Cbytes+0], 
+                 sizeof(float));
+          if(swap)
             floatbuf = swapb32(floatbuf);
-          real_dat[i] = (double)floatbuf;
+          real_dat[i] = (float)floatbuf;
         }
         break;
-      case 8: /* 8 byte double or (double)int64 */
-        if( strcmp(SMODE_CTYPE(MMAP_SMODE(mmap_obj)), "int64") == 0) {
+      case 8:
+        if(strcmp(SMODE_CTYPE(smode), "int64") == 0) { /* int64 */
           /* casting from int64 to R double to minimize precision loss */
-          for(i=0;  i < LEN; i++) {
-            ival = ((long)index_p[i]-1);
-            if( ival > upper_bound || ival < 0 )
-              error("'i=%i' out of bounds", (long)index_p[i]);
+          for(i = 0; i < LEN; i++) {
+            u = index_p[i]-1;
+            if(u >= mmap_len || u < 0)
+              error("'i=%i' out of bounds", u+1);
+            
             memcpy(&longbuf, 
-                   &(data[((long)index_p[i]-1)*sizeof(long)]), 
-                   sizeof(char)*sizeof(long));
-            if (swap)
+                   &data[u*Cbytes+0], 
+                   sizeof(int64_t));
+            if(swap)
               longbuf = swapb64(longbuf);
-            real_dat[i] = (double)longbuf;
+            real_dat[i] = longbuf;
           }
-        } else {
-        for(i=0;  i < LEN; i++) {
-          ival = ((long)index_p[i]-1);
-          if( ival > upper_bound || ival < 0 )
-            error("'i=%i' out of bounds", index_p[i]);
+        } else { /* double */
+        for(i = 0; i < LEN; i++) {
+          u = index_p[i]-1;
+          if(u >= mmap_len || u < 0)
+            error("'i=%i' out of bounds", u+1);
+          
           memcpy(&realbuf, 
-                 &(data[((long)index_p[i]-1)*sizeof(double)]), 
-                 sizeof(char)*sizeof(double));
-          if (swap)
+                 &data[u*Cbytes+0], 
+                 sizeof(double));
+          if(swap)
             realbuf = swapb64(realbuf);
           real_dat[i] = realbuf;
         }
@@ -604,16 +594,17 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     }
     break; /* }}} */
   case CPLXSXP: /* {{{ */
+    swap = asLogical(swap_byte_order);
+    
     complex_dat = COMPLEX(dat);
-    upper_bound = (MMAP_SIZE(mmap_obj)-Cbytes)/Cbytes;
-    swap = LOGICAL(swap_byte_order)[0];
-    for(i=0;  i < LEN; i++) {
-      ival = ((long)index_p[i]-1);
-      if( ival > upper_bound || ival < 0 )
-        error("'i=%i' out of bounds", index_p[i]);
+    for(i = 0; i < LEN; i++) {
+      u = index_p[i]-1;
+      if(u >= mmap_len || u < 0)
+        error("'i=%i' out of bounds", u+1);
+      
       memcpy(&Rcomplexbuf, 
-             &(data[((long)index_p[i]-1)*sizeof(Rcomplex)]), 
-             sizeof(char)*sizeof(Rcomplex));
+             &data[u*Cbytes+0], 
+             sizeof(Rcomplex));
       if (swap) {
         Rcomplexbuf.r = swapb64(Rcomplexbuf.r);
         Rcomplexbuf.i = swapb64(Rcomplexbuf.i);
@@ -622,30 +613,39 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     }
     break; /* }}} */
   case STRSXP: /* {{{ */
-    hasnul = !!SMODE_NUL_TERM(MMAP_SMODE(mmap_obj));
+    fieldCbytes = SMODE_CBYTES(smode);
+    hasnul = !!SMODE_NUL_TERM(smode);
     if(hasnul) { 
-      for(i=0; i < LEN; i++) {
-        str = (char *)(&(data[((long)index_p[i]-1)*Cbytes]));
+      for(i = 0; i < LEN; i++) {
+        u = index_p[i]-1;
+        if(u >= mmap_len || u < 0)
+          error("'i=%i' out of bounds", u+1);
+        
+        str = (char *)&data[u*Cbytes+0];
         SET_STRING_ELT(dat, i, (str[0] == 0 && str[1] != 0) ? NA_STRING
-                         : mkChar( (const char *)str));
+                         : mkChar((const char *)str));
       }
     } else {  /* nul-padded char array */
-      for(i=0; i < LEN; i++) {
-        str = (char *)(&(data[((long)index_p[i]-1)*Cbytes]));
+      for(i = 0; i < LEN; i++) {
+        u = index_p[i]-1;
+        if(u >= mmap_len || u < 0)
+          error("'i=%i' out of bounds", u+1);
+        
+        str = (char *)&data[u*Cbytes+0];
         SET_STRING_ELT(dat, i, (str[0] == 0 && str[1] != 0) ? NA_STRING
-                         : mkCharLen((const char *)str, strnlen(str, Cbytes)));
+                         : mkCharLen((const char *)str, strnlen(str, fieldCbytes)));
       }
     }
     break; /* }}} */
   case RAWSXP: /* {{{ */
     raw_dat = RAW(dat);
 // differ in signess???
-    upper_bound = (MMAP_SIZE(mmap_obj)-1);
-    for(i=0;  i < LEN; i++) {
-      ival =  ((long)index_p[i]-1);
-      if( ival > upper_bound || ival < 0 )
-        error("'i=%i' out of bounds", index_p[i]);
-      raw_dat[i] = data[((long)index_p[i]-1)];
+    for(i = 0; i < LEN; i++) {
+      u = index_p[i]-1;
+      if(u >= mmap_len || u < 0)
+        error("'i=%i' out of bounds", u+1);
+      
+      raw_dat[i] = (Rbyte)data[u*Cbytes+0];
     }
     break; /* }}} */
   case VECSXP:  /* corresponds to C struct for mmap package {{{ */
@@ -653,7 +653,7 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     ////byte_buf = RAW(byteBuf);
     /* extract_struct:
       
-       - bytes in struct from SMODE_CBYTES(MMAP_SMODE(mmap_obj))
+       - bytes in struct from SMODE_CBYTES(smode)
        - loop through all `i` memcpy struct to byte array
        - loop through VECSXP;
            test for TYPEOF
@@ -675,146 +675,209 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
       ////       &(data[((long)index_p[i]-1) * Cbytes]),
       ////       Cbytes); 
     ////}  
-    for(fi=0; fi<length(field); fi++) {
+    for(fi = 0; fi < length(field); fi++) {
       v = INTEGER(field)[fi]-1;
-      offset = SMODE_OFFSET(MMAP_SMODE(mmap_obj),v);
-      fieldCbytes = SMODE_CBYTES(VECTOR_ELT(MMAP_SMODE(mmap_obj), v));
-      fieldSigned = SMODE_SIGNED(VECTOR_ELT(MMAP_SMODE(mmap_obj), v));
-      switch(TYPEOF(VECTOR_ELT(MMAP_SMODE(mmap_obj), v))) {
+      offset = SMODE_OFFSET(smode,v);
+      vec_smode = VECTOR_ELT(smode, v);
+      switch(TYPEOF(vec_smode)) {
         case INTSXP:
           PROTECT(vec_dat = allocVector(INTSXP, LEN)); 
-          int_vec_dat = INTEGER(vec_dat);
-          switch(fieldCbytes) {
-            case sizeof(char):
-            if(fieldSigned) {   /* 1 byte char */
-            for(ii=0; ii<LEN; ii++) {
-              int_vec_dat[ii] = (int)(char)(data[((long)index_p[ii]-1) * Cbytes + offset]);
+          swap = LOGICAL(swap_byte_order)[fi];
+          
+          int_dat = INTEGER(vec_dat);
+          switch(SMODE_CBYTES(vec_smode)) {
+            case 1:
+            if(SMODE_SIGNED(vec_smode)) { /* int8 */
+            for(i = 0; i < LEN; i++) {
+              u = index_p[i]-1;
+              if(u >= mmap_len || u < 0)
+                error("'i=%i' out of bounds", u+1);
+              
+              int_dat[i] = (int8_t)data[u*Cbytes+offset];
             }
-            } else {            /* 1 byte unsigned char */
-            for(ii=0; ii<LEN; ii++) {
-              int_vec_dat[ii] = (int)(unsigned char)(data[((long)index_p[ii]-1) * Cbytes + offset]);
-            }
-            }
-            break;
-            case sizeof(short):
-            swap = LOGICAL(swap_byte_order)[fi];
-            if(fieldSigned) {   /* 2 byte */
-            for(ii=0; ii<LEN; ii++) {
-              memcpy(&sbuf, 
-                     &(data[((long)index_p[ii]-1) * Cbytes + offset]),
-                     sizeof(char)*sizeof(short));
-              if (swap)
-                sbuf = swapb16(sbuf);
-              int_vec_dat[ii] = (int)sbuf;
-            }
-            } else {            /* 2 byte unsigned short */
-            for(ii=0; ii<LEN; ii++) {
-              memcpy(&sbuf, 
-                     &(data[((long)index_p[ii]-1) * Cbytes + offset]),
-                     sizeof(char)*sizeof(short));
-              if (swap)
-                sbuf = swapb16(sbuf);
-              int_vec_dat[ii] = (int)(unsigned short)sbuf;
+            } else { /* uint8 */
+            for(i = 0; i < LEN; i++) {
+              u = index_p[i]-1;
+              if(u >= mmap_len || u < 0)
+                error("'i=%i' out of bounds", u+1);
+              
+              int_dat[i] = (uint8_t)data[u*Cbytes+offset];
             }
             }
             break;
-            case sizeof(int): /* 4 byte */
-            swap = LOGICAL(swap_byte_order)[fi];
-            for(ii=0; ii<LEN; ii++) {
+            case 2:
+            if(SMODE_SIGNED(vec_smode)) { /* int16 */
+            for(i = 0; i < LEN; i++) {
+              u = index_p[i]-1;
+              if(u >= mmap_len || u < 0)
+                error("'i=%i' out of bounds", u+1);
+              
+              memcpy(&sbuf, 
+                     &data[u*Cbytes+offset],
+                     sizeof(int16_t));
+              if(swap)
+                sbuf = swapb16(sbuf);
+              int_dat[i] = (int16_t)sbuf;
+            }
+            } else { /* uint16 */
+            for(i = 0; i < LEN; i++) {
+              u = index_p[i]-1;
+              if(u >= mmap_len || u < 0)
+                error("'i=%i' out of bounds", u+1);
+              
+              memcpy(&sbuf, 
+                     &data[u*Cbytes+offset],
+                     sizeof(uint16_t));
+              if(swap)
+                sbuf = swapb16(sbuf);
+              int_dat[i] = (uint16_t)sbuf;
+            }
+            }
+            break;
+            case 4: /* int32 */
+            for(i = 0; i < LEN; i++) {
+              u = index_p[i]-1;
+              if(u >= mmap_len || u < 0)
+                error("'i=%i' out of bounds", u+1);
+              
               memcpy(&intbuf, 
-                     &(data[((long)index_p[ii]-1) * Cbytes+offset]),
-                     sizeof(char)*sizeof(int));
-              if (swap)
+                     &data[u*Cbytes+offset],
+                     sizeof(int32_t));
+              if(swap)
                 intbuf = swapb32(intbuf);
-              int_vec_dat[ii] = intbuf;
+              int_dat[i] = (int32_t)intbuf;
             }
+            break;
+            default:
+            error("unknown data type");
             break;
           }
+          
           SET_VECTOR_ELT(dat, fi, vec_dat);
           UNPROTECT(1);
           break;
         case REALSXP:
           PROTECT(vec_dat = allocVector(REALSXP, LEN));
-          real_vec_dat = REAL(vec_dat);
           swap = LOGICAL(swap_byte_order)[fi];
-          switch(fieldCbytes) {
-            case sizeof(float): /* 4 byte */
-            for(ii=0; ii<LEN; ii++) {
+          
+          real_dat = REAL(vec_dat);
+          switch(SMODE_CBYTES(vec_smode)) {
+            case 4: /* float */
+            for(i = 0; i < LEN; i++) {
+              u = index_p[i]-1;
+              if(u >= mmap_len || u < 0)
+                error("'i=%i' out of bounds", u+1);
+              
               memcpy(&floatbuf, 
-                     &(data[((long)index_p[ii]-1) * Cbytes + offset]),
-                     sizeof(char)*sizeof(float));
-              if (swap)
+                     &data[u*Cbytes+offset],
+                     sizeof(float));
+              if(swap)
                 floatbuf = swapb32(floatbuf);
-              real_vec_dat[ii] = (double)floatbuf;
+              real_dat[i] = (float)floatbuf;
             }
             break;
-            case sizeof(double): /* 8 byte */
-            if( strcmp(SMODE_CTYPE(VECTOR_ELT(MMAP_SMODE(mmap_obj), v)),"int64") == 0) { 
+            case 8:
+            if(strcmp(SMODE_CTYPE(vec_smode),"int64") == 0) { /* int64 */
               /* casting from int64 to R double to minimize precision loss */
-              for(ii=0;  ii < LEN; ii++) {
+              for(i = 0; i < LEN; i++) {
+                u = index_p[i]-1;
+                if(u >= mmap_len || u < 0)
+                  error("'i=%i' out of bounds", u+1);
+                
                 memcpy(&longbuf, 
-                       &(data[((long)index_p[ii]-1) * Cbytes + offset]),
-                       sizeof(char)*sizeof(long));
-                if (swap)
+                       &data[u*Cbytes+offset],
+                       sizeof(int64_t));
+                if(swap)
                   longbuf = swapb64(longbuf);
-                real_vec_dat[ii] = (double)longbuf;
+                real_dat[i] = longbuf;
               }
-            } else {
-            for(ii=0; ii<LEN; ii++) {
+            } else { /* double */
+            for(i = 0; i < LEN; i++) {
+              u = index_p[i]-1;
+              if(u >= mmap_len || u < 0)
+                error("'i=%i' out of bounds", u+1);
+              
               memcpy(&realbuf, 
-                     &(data[((long)index_p[ii]-1) * Cbytes + offset]),
-                     sizeof(char)*sizeof(double));
-              if (swap)
+                     &data[u*Cbytes+offset],
+                     sizeof(double));
+              if(swap)
                 realbuf = swapb64(realbuf);
-              real_vec_dat[ii] = (double)realbuf;
+              real_dat[i] = realbuf;
             }
             }
+            break;
+            default:
+            break;
           }
+          
           SET_VECTOR_ELT(dat, fi, vec_dat);
           UNPROTECT(1);
           break;
         case CPLXSXP:
           PROTECT(vec_dat = allocVector(CPLXSXP, LEN));
-          complex_vec_dat = COMPLEX(vec_dat);
           swap = LOGICAL(swap_byte_order)[fi];
-          for(ii=0; ii<LEN; ii++) {
+          
+          complex_dat = COMPLEX(vec_dat);
+          for(i = 0; i < LEN; i++) {
+            u = index_p[i]-1;
+            if(u >= mmap_len || u < 0)
+              error("'i=%i' out of bounds", u+1);
+            
             memcpy(&Rcomplexbuf, 
-                   &(data[((long)index_p[ii]-1) * Cbytes + offset]),
-                   sizeof(char)*sizeof(Rcomplex));
-            if (swap) {
+                   &(data[u*Cbytes+offset]),
+                   sizeof(Rcomplex));
+            if(swap) {
               Rcomplexbuf.r = swapb64(Rcomplexbuf.r);
               Rcomplexbuf.i = swapb64(Rcomplexbuf.i);
             }
-            complex_vec_dat[ii] = Rcomplexbuf;
+            complex_dat[i] = Rcomplexbuf;
           }
+          
           SET_VECTOR_ELT(dat, fi, vec_dat);
           UNPROTECT(1);
           break;
         case RAWSXP: 
           PROTECT(vec_dat = allocVector(RAWSXP, LEN));
-          raw_vec_dat = RAW(vec_dat);
-          for(ii=0; ii<LEN; ii++) {
-            raw_vec_dat[ii] = (Rbyte)(data[((long)index_p[ii]-1) * Cbytes + offset]);
+          
+          raw_dat = RAW(vec_dat);
+          for(i = 0; i < LEN; i++) {
+            u = index_p[i]-1;
+            if(u >= mmap_len || u < 0)
+              error("'i=%i' out of bounds", u+1);
+            
+            raw_dat[i] = (Rbyte)(data[u*Cbytes+offset]);
           }
+          
           SET_VECTOR_ELT(dat, fi, vec_dat);
           UNPROTECT(1);
           break;
         case STRSXP:
-          hasnul = !!SMODE_NUL_TERM(VECTOR_ELT(MMAP_SMODE(mmap_obj),v));
           PROTECT(vec_dat = allocVector(STRSXP, LEN));
+          
+          fieldCbytes = SMODE_CBYTES(vec_smode);
+          hasnul = !!SMODE_NUL_TERM(vec_smode);
           if(hasnul) {
-            for(ii=0; ii < LEN; ii++) {
-              str = (char *)&( data[((long)index_p[ii]-1) * Cbytes + offset]);
-              SET_STRING_ELT(vec_dat, ii, (str[0] == 0 && str[1] != 0) ? NA_STRING
-                               : mkChar( (const char *)str));
+            for(i = 0; i < LEN; i++) {
+              u = index_p[i]-1;
+              if(u >= mmap_len || u < 0)
+                error("'i=%i' out of bounds", u+1);
+              
+              str = (char *)&data[u*Cbytes+offset];
+              SET_STRING_ELT(vec_dat, i, (str[0] == 0 && str[1] != 0) ? NA_STRING
+                               : mkChar((const char *)str));
             }
           } else {  /* nul-padded char array */
-            for(ii=0; ii < LEN; ii++) {
-              str = (char *)&(data[((long)index_p[ii]-1) * Cbytes + offset]);
-              SET_STRING_ELT(vec_dat, ii, (str[0] == 0 && str[1] != 0) ? NA_STRING
+            for(i = 0; i < LEN; i++) {
+              u = index_p[i]-1;
+              if(u >= mmap_len || u < 0)
+                error("'i=%i' out of bounds", u+1);
+              
+              str = (char *)&data[u*Cbytes+offset];
+              SET_STRING_ELT(vec_dat, i, (str[0] == 0 && str[1] != 0) ? NA_STRING
                                : mkCharLen((const char *)str, strnlen(str, fieldCbytes)));
             }
           }
+          
           SET_VECTOR_ELT(dat, fi, vec_dat);
           UNPROTECT(1);
           break; 
