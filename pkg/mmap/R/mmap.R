@@ -308,10 +308,66 @@ as.mmap.raw <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mmap(file, mode)
 }
 
+as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+  mode <- as.Ctype(mode)
+  
+  if(get.Ctype(mode) == "bitset") {
+    # Bitstring of all 1s except for the most significant bit, which is 0.
+    int.max.val <- as.integer(2 ^ 31 - 1)
+    
+    num.full.words <- length(x) %/% 32L
+    if (num.full.words > 0) {
+      # Subset the logical vector by full 32-bit words.
+      words <- unlist(lapply(1:num.full.words - 1, function(word.num) {
+        #word <- sum(bitwShiftL(1, which(!!x[1:31 + word.num * 32L]) - 1))
+        word <- sum(bitwShiftL(as.integer(!!x[1:31 + word.num * 32L]), 1:31 - 1))
+        
+        # `2^31` is interesting for two reasons: (1) it is R's representation
+        #  for NA_integer_, and (2) it is a negative number in 32-bit two's 
+        #  complement and R returns NA_integer_ upon overflow.
+        # Thus, if we need to set `2^31` (the "sign bit"), we have to be clever.
+        if(!x[32L + word.num * 32L]) {
+          word
+        } else if(word != int.max.val) {
+          # Negate the entire word so that the sign bit is set to 1, and then
+          #  negate again all bits besides the sign bit by exploiting the fact
+          #  that `xor(FALSE, TRUE) == TRUE && xor(TRUE, TRUE) == FALSE`.
+          bitwXor(bitwNot(word), int.max.val)
+        } else {
+          # Since `bitwNot(int.max.value) == NA_integer_`, we cannot use the
+          #  above hack. But since toggling the sign bit of `int.max.value`
+          #  results in the bitstring of all 1s, the result is trivial.
+          bitwNot(0)
+        }
+      }))
+    } else {
+      words <- integer(0)
+    }
+    
+    # Any remaining bits cannot make up a full word (or else they would've been
+    #  handled above) so we don't have to worry about avoiding NAs here.
+    rem <- length(x) %% 32L
+    if(rem != 0)
+      words <- c(words, sum(bitwShiftL(as.integer(!!tail(x, rem)), 1:rem - 1)))
+    
+    x <- words
+  }
+  
+  nbytes <- sizeof(mode)
+  if(nbytes > 1)
+    writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
+  else
+    writeBin(x, file, size=nbytes)
+  mmap(file, mode)
+}
+
 as.mmap.integer <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
-  writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
+  if(nbytes > 1)
+    writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
+  else
+    writeBin(x, file, size=nbytes)
   mmap(file, mode)
 }
 as.mmap.double <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {

@@ -17,7 +17,7 @@ export(
        extractFUN, "extractFUN<-",
        replaceFUN, "replaceFUN<-",
 
-       bitset,  # not yet implemented
+       bitset,
        bool8, bool32,
        char,  int8,  int16,  int32,  
        uchar, uint8, uint16, int64,
@@ -64,6 +64,7 @@ S3method(as.mmap, complex)
 S3method(as.mmap, double)
 S3method(as.mmap, integer)
 S3method(as.mmap, character)
+S3method(as.mmap, logical)
 
 # R object default conversion
 S3method(as.mmap, matrix)
