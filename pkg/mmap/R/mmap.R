@@ -261,7 +261,7 @@ normalize.encoding <- function(x, to) {
       else if (sizeof(x$storage.mode[[j[fi]]]) > 1)
         swap.byte.order[fi] <- attr(x$storage.mode[[j[fi]]], "endian") != .Platform$endian
   } else if (inherits(x$storage.mode, "string")) {
-    value <- normalize.encoding(value, attr(x$storage.mode, "enc"))
+    value <- normalize.encoding(as.character(value), attr(x$storage.mode, "enc"))
   } else if (sizeof(x$storage.mode) > 1) {
     swap.byte.order <- attr(x$storage.mode, "endian") != .Platform$endian
   }

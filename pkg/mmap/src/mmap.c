@@ -379,7 +379,8 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   if(strcmp(SMODE_CTYPE(smode), "bitset") == 0) { /* bitset */
     for(i = 0; i < LEN; i++) {
       u = index_p[i] - 1;
-      if(u >= mmap_len || u < 0)
+      // Note that we can store 32 values in each word.
+      if(u >= mmap_len * 32 || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
       // word.quot == u / 32 && word.rem == u % 32.
@@ -569,7 +570,7 @@ void character_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int
   
   fieldCbytes = SMODE_CBYTES(smode);
   hasnul = !!SMODE_NUL_TERM(smode);
-  if(hasnul) { 
+  if(hasnul) {
     for(i = 0; i < LEN; i++) {
       u = index_p[i] - 1;
       if(u >= mmap_len || u < 0)
@@ -662,45 +663,45 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
       offset = SMODE_OFFSET(smode, v);
       vec_smode = VECTOR_ELT(smode, v);
       switch(TYPEOF(vec_smode)) {
-        case LGLSXP:
-          PROTECT(vec_dat = allocVector(LGLSXP, LEN));
-          logical_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
-          SET_VECTOR_ELT(dat, fi, vec_dat);
-          UNPROTECT(1);
-          break;
-        case INTSXP:
-          PROTECT(vec_dat = allocVector(INTSXP, LEN));
-          integer_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
-          SET_VECTOR_ELT(dat, fi, vec_dat);
-          UNPROTECT(1);
-          break;
-        case REALSXP:
-          PROTECT(vec_dat = allocVector(REALSXP, LEN));
-          double_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
-          SET_VECTOR_ELT(dat, fi, vec_dat);
-          UNPROTECT(1);
-          break;
-        case CPLXSXP:
-          PROTECT(vec_dat = allocVector(CPLXSXP, LEN));
-          complex_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, LOGICAL(swap_byte_order)[fi]);
-          SET_VECTOR_ELT(dat, fi, vec_dat);
-          UNPROTECT(1);
-          break;
-        case RAWSXP:
-          PROTECT(vec_dat = allocVector(RAWSXP, LEN));
-          raw_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset);
-          SET_VECTOR_ELT(dat, fi, vec_dat);
-          UNPROTECT(1);
-          break;
-        case STRSXP:
-          PROTECT(vec_dat = allocVector(STRSXP, LEN));
-          character_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, vec_smode);
-          SET_VECTOR_ELT(dat, fi, vec_dat);
-          UNPROTECT(1);
-          break;
-        default:
-          error("unimplemented type");
-          break;
+      case LGLSXP:
+        PROTECT(vec_dat = allocVector(LGLSXP, LEN));
+        logical_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
+        SET_VECTOR_ELT(dat, fi, vec_dat);
+        UNPROTECT(1);
+        break;
+      case INTSXP:
+        PROTECT(vec_dat = allocVector(INTSXP, LEN));
+        integer_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
+        SET_VECTOR_ELT(dat, fi, vec_dat);
+        UNPROTECT(1);
+        break;
+      case REALSXP:
+        PROTECT(vec_dat = allocVector(REALSXP, LEN));
+        double_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
+        SET_VECTOR_ELT(dat, fi, vec_dat);
+        UNPROTECT(1);
+        break;
+      case CPLXSXP:
+        PROTECT(vec_dat = allocVector(CPLXSXP, LEN));
+        complex_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, LOGICAL(swap_byte_order)[fi]);
+        SET_VECTOR_ELT(dat, fi, vec_dat);
+        UNPROTECT(1);
+        break;
+      case STRSXP:
+        PROTECT(vec_dat = allocVector(STRSXP, LEN));
+        character_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset, vec_smode);
+        SET_VECTOR_ELT(dat, fi, vec_dat);
+        UNPROTECT(1);
+        break;
+      case RAWSXP:
+        PROTECT(vec_dat = allocVector(RAWSXP, LEN));
+        raw_extract(data, vec_dat, LEN, index_p, mmap_len, Cbytes, offset);
+        SET_VECTOR_ELT(dat, fi, vec_dat);
+        UNPROTECT(1);
+        break;
+      default:
+        error("unimplemented type");
+        break;
       }
     } /* }}} */
     break;
@@ -724,16 +725,23 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   if(strcmp(SMODE_CTYPE(smode), "bitset") == 0) {  /* bitset */
     for(i = 0; i < LEN; i++) {
       u = index_p[i] - 1;
-      if(u >= mmap_len || u < 0)
+      // Note that we can store 32 values in each word.
+      if(u >= mmap_len * 32 || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
       // word.quot == u / 32 && word.rem == u % 32.
       word = div(u, 32);
       memcpy(&intbuf, &data[word.quot * record_size + offset], sizeof(int32_t));
+      // Endianness takes on a very convoluted meaning here. Still, this should
+      //  be portable as long as we are consistent in using 32-bit chunks.
+      if(swap)
+        intbuf = swapb32(intbuf);
       if(lgl_value[i])
         intbuf = intbuf | bitmask[word.rem];
       else
         intbuf = intbuf & nbitmask[word.rem];
+      if(swap)
+        intbuf = swapb32(intbuf);
       memcpy(&data[word.quot * record_size + offset], &intbuf, sizeof(int32_t));
     }
   } else {
@@ -744,7 +752,7 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        data[u * record_size + offset] = lgl_value[i];
+        data[u * record_size + offset] = (uint8_t)lgl_value[i];
       }
       break;
     case 4: /* bool32 */
@@ -920,10 +928,10 @@ void character_replace(unsigned char *data, SEXP value, int LEN, int *index_p, i
     // I'm hoping that R internally stores the length of strings
     //  so that length(CHARSXP) is O(1).
     charsxp_len = length(STRING_ELT(value,i));
-    if (STRING_ELT(value, i) == NA_STRING) {
+    if(STRING_ELT(value, i) == NA_STRING) {
       // Strings that start with { 0x00, 0xff } represent NA.
       data[u * record_size + offset + 1] = 0xff;
-    } else if (charsxp_len > fieldCbytes - hasnul) {
+    } else if(charsxp_len > fieldCbytes - hasnul) {
       warning("Long strings were truncated");
       memcpy(&data[u * record_size + offset], CHAR(STRING_ELT(value,i)), fieldCbytes - hasnul);
     } else {
@@ -964,6 +972,9 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
 
   if(mode != VECSXP) {
     PROTECT(value = coerceVector(value, mode)); P++;
+    if (length(value) != LEN)
+      // Code on R side failed to properly handle the recycling.
+      error("size of struct and size of replacement value do not match");
   }
   PROTECT(index = coerceVector(index, INTSXP)); P++;
   PROTECT(field = coerceVector(field, INTSXP)); P++;
@@ -978,49 +989,8 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
   case REALSXP: /* {{{ */
     double_replace(data, value, LEN, index_p, mmap_len, Cbytes, 0, smode, asLogical(swap_byte_order));
     break; /* }}} */
-  case VECSXP: /* aka "struct"{{{ */
-    if(length(value) != length(field))
-      error("size of struct and size of replacement value do not match");
-    for(fi = 0; fi < length(field); fi++) {
-      v = INTEGER(field)[fi] - 1;
-      offset = SMODE_OFFSET(smode, v);
-      vec_smode = VECTOR_ELT(smode, v);
-      switch(TYPEOF(vec_smode)) {
-        case LGLSXP:
-          PROTECT(vec_value = coerceVector(VECTOR_ELT(value, fi), LGLSXP));
-          logical_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
-          UNPROTECT(1);
-          break;
-        case INTSXP:
-          PROTECT(vec_value = coerceVector(VECTOR_ELT(value, fi), INTSXP));
-          integer_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
-          UNPROTECT(1);
-          break;
-        case REALSXP:
-          PROTECT(vec_value = coerceVector(VECTOR_ELT(value, fi), REALSXP));
-          double_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
-          UNPROTECT(1);
-          break;
-        case CPLXSXP:
-          PROTECT(vec_value = coerceVector(VECTOR_ELT(value, fi), CPLXSXP));
-          complex_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, LOGICAL(swap_byte_order)[fi]);
-          UNPROTECT(1);
-          break;
-        case RAWSXP:
-          PROTECT(vec_value = coerceVector(VECTOR_ELT(value, fi), RAWSXP));
-          raw_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset);
-          UNPROTECT(1);
-          break;
-        case STRSXP:
-          PROTECT(vec_value = coerceVector(VECTOR_ELT(value, fi), STRSXP));
-          character_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, vec_smode);
-          UNPROTECT(1);
-          break;
-        default:
-          error("unimplemented replacement type");
-          break;
-      }
-    } /* VECSXP }}} */
+  case CPLXSXP:
+    complex_replace(data, value, LEN, index_p, mmap_len, Cbytes, 0, asLogical(swap_byte_order));
     break;
   case STRSXP:
     character_replace(data, value, LEN, index_p, mmap_len, Cbytes, 0, smode);
@@ -1028,8 +998,54 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
   case RAWSXP:
     raw_replace(data, value, LEN, index_p, mmap_len, Cbytes, 0);
     break;
-  case CPLXSXP:
-    complex_replace(data, value, LEN, index_p, mmap_len, Cbytes, 0, asLogical(swap_byte_order));
+  case VECSXP: /* aka "struct"{{{ */
+    if(length(value) != length(field))
+      // Code on R side failed to properly handle the recycling.
+      error("size of struct and size of replacement value do not match");
+    for(fi = 0; fi < length(field); fi++) {
+      v = INTEGER(field)[fi] - 1;
+      offset = SMODE_OFFSET(smode, v);
+      vec_smode = VECTOR_ELT(smode, v);
+      vec_value = VECTOR_ELT(value, fi);
+      if (length(vec_value) != LEN)
+        // Code on R side failed to properly handle the recycling.
+        error("size of struct and size of replacement value do not match");
+      switch(TYPEOF(vec_smode)) {
+      case LGLSXP:
+        PROTECT(vec_value = coerceVector(vec_value, LGLSXP));
+        logical_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
+        UNPROTECT(1);
+        break;
+      case INTSXP:
+        PROTECT(vec_value = coerceVector(vec_value, INTSXP));
+        integer_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
+        UNPROTECT(1);
+        break;
+      case REALSXP:
+        PROTECT(vec_value = coerceVector(vec_value, REALSXP));
+        double_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, vec_smode, LOGICAL(swap_byte_order)[fi]);
+        UNPROTECT(1);
+        break;
+      case CPLXSXP:
+        PROTECT(vec_value = coerceVector(vec_value, CPLXSXP));
+        complex_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, LOGICAL(swap_byte_order)[fi]);
+        UNPROTECT(1);
+        break;
+      case STRSXP:
+        PROTECT(vec_value = coerceVector(vec_value, STRSXP));
+        character_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset, vec_smode);
+        UNPROTECT(1);
+        break;
+      case RAWSXP:
+        PROTECT(vec_value = coerceVector(vec_value, RAWSXP));
+        raw_replace(data, vec_value, LEN, index_p, mmap_len, Cbytes, offset);
+        UNPROTECT(1);
+        break;
+      default:
+        error("unimplemented replacement type");
+        break;
+      }
+    } /* VECSXP }}} */
     break;
   default:
     error("unsupported type");
