@@ -156,17 +156,17 @@ int64 <- function(endian=c("big", "little", "swap", "platform")) {
 
 real32 <- function(endian=c("big", "little", "swap", "platform")) { 
   endian <- normalize.endianness(match.arg(endian))
-  structure(double(0), bytes=4L, endian=endian, class=c("float","Ctype"))
+  structure(double(0), bytes=4L, endian=endian, class=c("real32","Ctype"))
 }
 
 real64 <- function(endian=c("big", "little", "swap", "platform")) { 
   endian <- normalize.endianness(match.arg(endian))
-  structure(double(0), bytes=8L, endian=endian, class=c("double","Ctype"))
+  structure(double(0), bytes=8L, endian=endian, class=c("real64","Ctype"))
 }
 
 cplx <- function(endian=c("big", "little", "swap", "platform")) {
   endian <- normalize.endianness(match.arg(endian))
-  structure(complex(0), bytes=16L, endian=endian, class=c("complex","Ctype"))
+  structure(complex(0), bytes=16L, endian=endian, class=c("cplx","Ctype"))
 }
 
 bitset <- function(endian=c("big", "little", "swap", "platform")) {

@@ -6,6 +6,10 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+#include <assert.h>
+#define __STDC_LIMIT_MACROS
+#define __STDC_CONSTANT_MACROS
+#include <stdint.h>
 
 #include "mmap.h"
 
@@ -15,22 +19,27 @@
 #endif
 #else
 #include <ctype.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <windows.h>
 #undef HAVE_MADVISE
 #endif
 
 /*
-Use the union initializer list hack in the absence of `reinterpret_cast`.
-It is better supported by strict-aliasing compilers than the `*(uint32_t*)&x`
+Use the union initializer list hack in the absence of `reinterpret_cast` to type
+ pun, i.e. "cast" between two same-size types by preserving the bit pattern
+ rather than the conceptual value.
+It is better supported by strict-aliasing compilers than the `*(as_type*)&x`
  hack, despite both having undefined behavior, and it can be done in one line
- whereas the `*(uint32_t*)&x` hack cannot because we cannot take the address of
+ whereas the `*(as_type*)&x` hack cannot because we cannot take the address of
  an rvalue in the manner of `*(typeof(x)*)&__builtin_bswap32(*(uint32_t*)&(x))`.
+The most well-defined approach would be to create a temporary uintN_t variable
+ and memcpy `x` to it, but this cannot be done in one line. Optimizing compilers
+ will likely have an intrinsic for this pattern and manage to no-op it though.
 */
-#define swapb16(x) ((union{uint16_t y;typeof(x) z;}){__builtin_bswap16((union{typeof(x) y;uint16_t z;}){x}.z)}.z)
-#define swapb32(x) ((union{uint32_t y;typeof(x) z;}){__builtin_bswap32((union{typeof(x) y;uint32_t z;}){x}.z)}.z)
-#define swapb64(x) ((union{uint64_t y;typeof(x) z;}){__builtin_bswap64((union{typeof(x) y;uint64_t z;}){x}.z)}.z)
+#define bitw_cast(as_type, x) ((union{typeof(x) y; as_type z;}){x}.z)
+#define swapb16(x) (bitw_cast(typeof(x),__builtin_bswap16(bitw_cast(uint16_t,x))))
+#define swapb32(x) (bitw_cast(typeof(x),__builtin_bswap32(bitw_cast(uint32_t,x))))
+#define swapb64(x) (bitw_cast(typeof(x),__builtin_bswap64(bitw_cast(uint64_t,x))))
 /*
 __builtin_bswap32() and __builtin_bswap64() were defined in GCC 4.2.0 but
  __builtin_bswap16() wasn't defined until GCC 4.8.0. The earliest supported
@@ -47,6 +56,36 @@ static inline uint16_t __builtin_bswap16(uint16_t x){return(x<<8)|(x>>8);}
 #if CHAR_BIT != 8
 #error "`char` is not 8-bits"
 #endif
+
+// For the sake of allowing uninterrupted counting from 0 to overflow, NA values
+//  for unsigned types should be equivalent to UINTn_MAX.
+#define NA_UINT8   ((uint8_t)  UINT8_C(0xFF))
+#define NA_UINT16 ((uint16_t) UINT16_C(0xFFFF))
+#define NA_UINT32 ((uint32_t) UINT32_C(0xFFFFFFFF))
+// For consistency with NA_INTEGER, NA values for signed types should be
+//  equivalent to INTn_MIN. This is convenient because the two's complement
+//  negation of any positive number is always representable and because any
+//  operation that overflows should result in NA anyway; the operation
+//  `INTn_MAX + 1`, which typically overflows to `INTn_MIN`, is no exception.
+// Technically, whether the bit pattern is kept in the below casts is compiler
+//  implementation defined, but the C99 standard defines that intN_t must be
+//  two's complement so gcc/mingw would very likely behave as we would expect.
+#define NA_INT8     ((int8_t)   INT8_C(0x80))
+#define NA_INT16   ((int16_t)  INT16_C(0x8000))
+#define NA_INT32   ((int32_t)  INT32_C(0x80000000))
+#define NA_INT64   ((int64_t)  INT64_C(0x8000000000000000))
+// Signaling NaN (quiet is 0x7FC0...) with Ross Ihaka's birth year as a payload.
+// Usually sNaN is 0x7FA0... to avoid setting the quiet bit yet also avoiding
+//  a payload of 0 (which represents +Inf), but `1954 != 0` so 0x7F80... is OK.
+#define NA_FLOAT  (bitw_cast(float,(uint32_t)(UINT16_C(1954)|UINT32_C(0x7F800000))))
+// Signaling NaN (quiet is 0x7FF8...) with Ross Ihaka's birth year as a payload.
+// Usually sNaN is 0x7FF4... to avoid setting the quiet bit yet also avoiding
+//  a payload of 0 (which represents +Inf), but `1954 != 0` so 0x7FF0... is OK.
+#define NA_DOUBLE (bitw_cast(double,(uint64_t)(UINT16_C(1954)|UINT64_C(0x7FF0000000000000))))
+// These are useful when comparing the payloads of two NaN values for equality
+//  since `NaN == NaN` is defined to always be false.
+#define bitw_eq32(x, y) (bitw_cast(uint32_t, x) == bitw_cast(uint32_t, y))
+#define bitw_eq64(x, y) (bitw_cast(uint64_t, x) == bitw_cast(uint64_t, y))
 
 /*
 The "mmap" package for R is designed to provide a
@@ -372,6 +411,7 @@ SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP prot) {
 void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
   int i, u;
   int *lgl_dat;
+  int8_t bytebuf;
   int32_t intbuf;
   div_t word;
   
@@ -400,7 +440,11 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        lgl_dat[i] = (uint8_t)data[u * record_size + offset];
+        bytebuf = data[u * record_size + offset];
+        if((uint8_t)bytebuf == NA_UINT8)
+          lgl_dat[i] = NA_LOGICAL;
+        else
+          lgl_dat[i] = (uint8_t)bytebuf;
       }
       break;
     case 4: /* bool32 */
@@ -412,6 +456,7 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
         memcpy(&intbuf, &data[u * record_size + offset], sizeof(int32_t));
         if(swap)
           intbuf = swapb32(intbuf);
+        assert(NA_LOGICAL == NA_INT32);
         lgl_dat[i] = (int32_t)intbuf;
       }
       break;
@@ -425,6 +470,7 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
 void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
   int i, u;
   int *int_dat;
+  int8_t bytebuf;
   int16_t sbuf;
   int32_t intbuf;
   
@@ -437,7 +483,11 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        int_dat[i] = (int8_t)data[u * record_size + offset];
+        bytebuf = data[u * record_size + offset];
+        if((int8_t)bytebuf == NA_INT8)
+          int_dat[i] = NA_INTEGER;
+        else
+          int_dat[i] = (int8_t)bytebuf;
       }
     } else { /* uint8 */
       for(i = 0; i < LEN; i++) {
@@ -445,7 +495,11 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        int_dat[i] = (uint8_t)data[u * record_size + offset];
+        bytebuf = data[u * record_size + offset];
+        if((uint8_t)bytebuf == NA_UINT8)
+          int_dat[i] = NA_INTEGER;
+        else
+          int_dat[i] = (uint8_t)bytebuf;
       }
     }
     break;
@@ -459,7 +513,10 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
         memcpy(&sbuf, &data[u * record_size + offset], sizeof(int16_t));
         if(swap)
           sbuf = swapb16(sbuf);
-        int_dat[i] = (int16_t)sbuf;
+        if((int16_t)sbuf == NA_INT16)
+          int_dat[i] = NA_INTEGER;
+        else
+          int_dat[i] = (int16_t)sbuf;
       }
     } else { /* uint16 */
       for(i = 0; i < LEN; i++) {
@@ -470,7 +527,10 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
         memcpy(&sbuf, &data[u * record_size + offset], sizeof(uint16_t));
         if(swap)
           sbuf = swapb16(sbuf);
-        int_dat[i] = (uint16_t)sbuf;
+        if((uint16_t)sbuf == NA_UINT16)
+          int_dat[i] = NA_INTEGER;
+        else
+          int_dat[i] = (uint16_t)sbuf;
       }
     }
     break;
@@ -483,6 +543,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
       memcpy(&intbuf, &data[u * record_size + offset], sizeof(int32_t));
       if(swap)
         intbuf = swapb32(intbuf);
+      assert(NA_INTEGER == NA_INT32);
       int_dat[i] = (int32_t)intbuf;
     }
     break;
@@ -501,7 +562,7 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
   
   real_dat = REAL(dat);
   switch(SMODE_CBYTES(smode)) {
-  case 4: /* float */
+  case 4: /* real32 */
     for(i = 0; i < LEN; i++) {
       u = index_p[i] - 1;
       if(u >= mmap_len || u < 0)
@@ -510,7 +571,10 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
       memcpy(&floatbuf, &data[u * record_size + offset], sizeof(float));
       if(swap)
         floatbuf = swapb32(floatbuf);
-      real_dat[i] = (float)floatbuf;
+      if(bitw_eq32(floatbuf, NA_FLOAT))
+        real_dat[i] = NA_REAL;
+      else
+        real_dat[i] = (float)floatbuf;
     }
     break;
   case 8:
@@ -524,9 +588,12 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
         memcpy(&longbuf, &data[u * record_size + offset], sizeof(int64_t));
         if(swap)
           longbuf = swapb64(longbuf);
-        real_dat[i] = (int64_t)longbuf;
+        if((int64_t)longbuf == NA_INT64)
+          real_dat[i] = NA_REAL;
+        else
+          real_dat[i] = (int64_t)longbuf;
       }
-    } else { /* double */
+    } else { /* real64 */
       for(i = 0; i < LEN; i++) {
         u = index_p[i] - 1;
         if(u >= mmap_len || u < 0)
@@ -535,6 +602,7 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
         memcpy(&realbuf, &data[u * record_size + offset], sizeof(double));
         if(swap)
           realbuf = swapb64(realbuf);
+        assert(bitw_eq64(NA_REAL, NA_DOUBLE));
         real_dat[i] = (double)realbuf;
       }
     }
@@ -547,6 +615,7 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
 void complex_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, int swap) {
   int i, u;
   Rcomplex *complex_dat;
+  double doublepairbuf[2];
   Rcomplex Rcomplexbuf;
   
   complex_dat = COMPLEX(dat);
@@ -555,7 +624,20 @@ void complex_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
-    memcpy(&Rcomplexbuf, &data[u * record_size + offset], sizeof(Rcomplex));
+    // On all platforms that R compiles on, consecutive doubles in a struct
+    //  should be aligned such that there is no padding inbetween. Still, it is
+    //  more portable to memcpy first to an array which is guaranteed to store
+    //  consecutive doubles in contiguous memory (no padding), and then copy the
+    //  two doubles one-by-one to the struct. If R is ever indeed compiled on a
+    //  16-byte-aligned platform, then `as.mmap.complex()` will have to be
+    //  rewritten because `writeBin()` unsafely memcpys to and from the struct.
+    // Note that the order of array/struct members must be preserved in memory,
+    //  so it is only within each double does endianness play a part. That means
+    //  that if swap is true, we have to rearrange (R8, ..., R1, I8, ... I1),
+    //  NOT (I8, ..., I1, R8, ..., R1), to the order (R1, ..., R8, I1, ..., I8).
+    memcpy(&doublepairbuf, &data[u * record_size + offset], 2 * sizeof(double));
+    Rcomplexbuf.r = doublepairbuf[0];
+    Rcomplexbuf.i = doublepairbuf[1];
     if(swap) {
       Rcomplexbuf.r = swapb64(Rcomplexbuf.r);
       Rcomplexbuf.i = swapb64(Rcomplexbuf.i);
@@ -577,8 +659,10 @@ void character_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int
         error("'i=%i' out of bounds", u + 1);
       
       str = (char *)&data[u * record_size + offset];
-      SET_STRING_ELT(dat, i, (str[0] == 0 && str[1] != 0) ? NA_STRING
-                       : mkChar((const char *)str));
+      if(str[0] == 0 && str[1] != 0)
+        SET_STRING_ELT(dat, i, NA_STRING);
+      else
+        SET_STRING_ELT(dat, i, mkChar((const char *)str));
     }
   } else {  /* nul-padded char array */
     for(i = 0; i < LEN; i++) {
@@ -587,8 +671,10 @@ void character_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int
         error("'i=%i' out of bounds", u + 1);
       
       str = (char *)&data[u * record_size + offset];
-      SET_STRING_ELT(dat, i, (str[0] == 0 && str[1] != 0) ? NA_STRING
-                       : mkCharLen((const char *)str, strnlen(str, fieldCbytes)));
+      if(str[0] == 0 && str[1] != 0)
+        SET_STRING_ELT(dat, i, NA_STRING);
+      else
+        SET_STRING_ELT(dat, i, mkCharLen((const char *)str, strnlen(str, fieldCbytes)));
     }
   }
 }
@@ -736,10 +822,14 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
       //  be portable as long as we are consistent in using 32-bit chunks.
       if(swap)
         intbuf = swapb32(intbuf);
-      if(lgl_value[i])
-        intbuf = intbuf | bitmask[word.rem];
-      else
+      if(lgl_value[i] == NA_LOGICAL) {
+        warning("NA values treated as FALSE in coercion to bitset");
         intbuf = intbuf & nbitmask[word.rem];
+      } else if(lgl_value[i]) {
+        intbuf = intbuf | bitmask[word.rem];
+      } else {
+        intbuf = intbuf & nbitmask[word.rem];
+      }
       if(swap)
         intbuf = swapb32(intbuf);
       memcpy(&data[word.quot * record_size + offset], &intbuf, sizeof(int32_t));
@@ -752,7 +842,27 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        data[u * record_size + offset] = (uint8_t)lgl_value[i];
+        // R doesn't normalize logicals when assigned a value other than 1
+        //  through C code. Any non-zero values will display as TRUE. The
+        //  behavior is evident when calling `as.integer(x)` or `x == TRUE`
+        //  where `x` is returned by the following C code:
+        //    SEXP x;
+        //    PROTECT(x = allocVector(LGLSXP, 1));
+        //    LOGICAL(x)[0] = 2;
+        //    UNPROTECT(1);
+        //    return x;
+        // There may actually be precision loss here if such behavior is
+        //  exploited intentionally, but most likely the user would not notice
+        //  so there is no need to give a warning. However, we do need to ensure
+        //  that non-zero values are never truncated to zero and that non-NA
+        //  values are never truncated to NA.
+        if(lgl_value[i] == NA_LOGICAL)
+          data[u * record_size + offset] = NA_UINT8;
+        else if((uint8_t)lgl_value[i] == NA_UINT8
+                  || ((uint8_t)lgl_value[i] == 0 && lgl_value[i] != 0))
+          data[u * record_size + offset] = 1;
+        else
+          data[u * record_size + offset] = (uint8_t)lgl_value[i];
       }
       break;
     case 4: /* bool32 */
@@ -761,7 +871,8 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        intbuf = lgl_value[i];
+        assert(NA_LOGICAL == NA_INT32);
+        intbuf = (int32_t)lgl_value[i];
         if(swap)
           intbuf = swapb32(intbuf);
         memcpy(&data[u * record_size + offset], &intbuf, sizeof(int32_t));
@@ -789,7 +900,17 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        data[u * record_size + offset] = (int8_t)int_value[i];
+        // Give a warning and store NA if there is precision loss or if the
+        //  integer value unluckily matches the representation of NA in int8.
+        if(int_value[i] == NA_INTEGER) {
+          data[u * record_size + offset] = NA_INT8;
+        } else if((int8_t)int_value[i] == NA_INT8
+                    || (int)(int8_t)int_value[i] != int_value[i]) {
+          warning("NAs introduced by coercion to int8 range");
+          data[u * record_size + offset] = NA_INT8;
+        } else {
+          data[u * record_size + offset] = (int8_t)int_value[i];
+        }
       }
     } else { /* uint8 */
       for(i = 0; i < LEN; i++) {
@@ -797,7 +918,17 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        data[u * record_size + offset] = (uint8_t)int_value[i];
+        // Give a warning and store NA if there is precision loss or if the
+        //  integer value unluckily matches the representation of NA in uint8.
+        if(int_value[i] == NA_INTEGER) {
+          data[u * record_size + offset] = NA_UINT8;
+        } else if((uint8_t)int_value[i] == NA_UINT8
+                    || (int)(uint8_t)int_value[i] != int_value[i]) {
+          warning("NAs introduced by coercion to uint8 range");
+          data[u * record_size + offset] = NA_UINT8;
+        } else {
+          data[u * record_size + offset] = (uint8_t)int_value[i];
+        }
       }
     }
     break;
@@ -808,7 +939,17 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        sbuf = (int16_t)int_value[i];
+        // Give a warning and store NA if there is precision loss or if the
+        //  integer value unluckily matches the representation of NA in int16.
+        if(int_value[i] == NA_INTEGER) {
+          sbuf = NA_INT16;
+        } else if((int16_t)int_value[i] == NA_INT16
+                    || (int)(int16_t)int_value[i] != int_value[i]) {
+          warning("NAs introduced by coercion to int16 range");
+          sbuf = NA_INT16;
+        } else {
+          sbuf = (int16_t)int_value[i];
+        }
         if(swap)
           sbuf = swapb16(sbuf);
         memcpy(&data[u * record_size + offset], &sbuf, sizeof(int16_t));
@@ -819,7 +960,17 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        sbuf = (uint16_t)int_value[i];
+        // Give a warning and store NA if there is precision loss or if the
+        //  integer value unluckily matches the representation of NA in uint16.
+        if(int_value[i] == NA_INTEGER) {
+          sbuf = NA_UINT16;
+        } else if((uint16_t)int_value[i] == NA_UINT16
+                    || (int)(uint16_t)int_value[i] != int_value[i]) {
+          warning("NAs introduced by coercion to uint16 range");
+          sbuf = NA_UINT16;
+        } else {
+          sbuf = (uint16_t)int_value[i];
+        }
         if(swap)
           sbuf = swapb16(sbuf);
         memcpy(&data[u * record_size + offset], &sbuf, sizeof(uint16_t));
@@ -832,6 +983,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
+      assert(NA_INTEGER == NA_INT32);
       intbuf = (int32_t)int_value[i];
       if(swap)
         intbuf = swapb32(intbuf);
@@ -853,13 +1005,18 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
   
   real_value = REAL(value);
   switch(SMODE_CBYTES(smode)) {
-  case 4: /* float */
+  case 4: /* real32 */
     for(i = 0; i < LEN; i++) {
       u = index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
-      floatbuf = (float)real_value[i];
+      // As opposed to the integer case, there is no need to substitute NA_FLOAT
+      //  and give a warning when there is precision loss.
+      if(ISNA(real_value[i]))
+        floatbuf = NA_FLOAT;
+      else
+        floatbuf = (float)real_value[i];
       if(swap)
         floatbuf = swapb32(floatbuf);
       memcpy(&data[u * record_size + offset], &floatbuf, sizeof(float));
@@ -872,17 +1029,39 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
-        longbuf = (long)real_value[i];
+        // `2^63` is perfectly representable in IEEE 754 since 63 is well within
+        //  the normalized exponent range of [-(2^(11-1)-1), 2^(11-1)-1] and the
+        //  significand is exactly 1. Therefore, the floating point value can
+        //  encode `NA_INT64` as a regular number. The floating point value can
+        //  also encode numbers of either sign with normalized exponents as high
+        //  as 2047, so we can also lose precision with these large numbers.
+        // `INT64_MIN == -2^63` so it can be perfectly represented as a double.
+        //  If there weren't the complication with `NA_INT64`, there would be no
+        //  loss of precision when `real_value[i] == (double)INT64_MIN`.
+        // However, `INT64_MAX == 2^63-1` so it rounds up to `2^63` (the nearest
+        //  representable number) when casted to double. Therefore, there is
+        //  still a loss of precision when `real_value[i] == (double)INT64_MAX`.
+        if(ISNA(real_value[i])) {
+          longbuf = NA_INT64;
+        } else if(real_value[i] == (double)NA_INT64
+                    || real_value[i] < (double)INT64_MIN
+                    || real_value[i] >= (double)INT64_MAX) {
+          warning("NAs introduced by coercion to int64 range");
+          longbuf = NA_INT64;
+        } else {
+          longbuf = (int64_t)real_value[i];
+        }
         if(swap)
           longbuf = swapb64(longbuf);
         memcpy(&data[u * record_size + offset], &longbuf, sizeof(int64_t));
       }
-    } else { /* double */
+    } else { /* real64 */
       for(i = 0; i < LEN; i++) {
         u = index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
+        assert(bitw_eq64(NA_REAL, NA_DOUBLE));
         realbuf = (double)real_value[i];
         if(swap)
           realbuf = swapb64(realbuf);
@@ -896,6 +1075,7 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
 void complex_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, int swap) {
   int i, u;
   Rcomplex *complex_value;
+  double doublepairbuf[2];
   Rcomplex Rcomplexbuf;
   
   complex_value = COMPLEX(value);
@@ -909,7 +1089,9 @@ void complex_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
       Rcomplexbuf.r = swapb64(Rcomplexbuf.r);
       Rcomplexbuf.i = swapb64(Rcomplexbuf.i);
     }
-    memcpy(&data[u * record_size + offset], &Rcomplexbuf, sizeof(Rcomplex));
+    doublepairbuf[0] = Rcomplexbuf.r;
+    doublepairbuf[1] = Rcomplexbuf.i;
+    memcpy(&data[u * record_size + offset], &doublepairbuf, 2 * sizeof(double));
   }
 }
 

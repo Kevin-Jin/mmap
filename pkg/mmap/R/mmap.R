@@ -310,17 +310,20 @@ as.mmap.raw <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
 
 as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
+  nbytes <- sizeof(mode)
   
   if(get.Ctype(mode) == "bitset") {
+    if(anyNA(x))
+      warning("NA values treated as FALSE in coercion to bitset")
+    
     # Bitstring of all 1s except for the most significant bit, which is 0.
-    int.max.val <- as.integer(2 ^ 31 - 1)
+    int.max.val <- .Machine$integer.max
     
     num.full.words <- length(x) %/% 32L
-    if (num.full.words > 0) {
+    if(num.full.words > 0) {
       # Subset the logical vector by full 32-bit words.
       words <- unlist(lapply(1:num.full.words - 1, function(word.num) {
-        #word <- sum(bitwShiftL(1, which(!!x[1:31 + word.num * 32L]) - 1))
-        word <- sum(bitwShiftL(as.integer(!!x[1:31 + word.num * 32L]), 1:31 - 1))
+        word <- sum(bitwShiftL(as.integer(!!x[1:31 + word.num * 32L]), 1:31 - 1), na.rm = TRUE)
         
         # `2^31` is interesting for two reasons: (1) it is R's representation
         #  for NA_integer_, and (2) it is a negative number in 32-bit two's 
@@ -348,12 +351,27 @@ as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
     #  handled above) so we don't have to worry about avoiding NAs here.
     rem <- length(x) %% 32L
     if(rem != 0)
-      words <- c(words, sum(bitwShiftL(as.integer(!!tail(x, rem)), 1:rem - 1)))
+      words <- c(words, sum(bitwShiftL(as.integer(!!tail(x, rem)), 1:rem - 1), na.rm = TRUE))
     
     x <- words
   }
   
-  nbytes <- sizeof(mode)
+  # writeBin() simply overflows, so we need to do some preprocessing.
+  if(nbytes < 4L) {
+    INT_MAX <- bitwShiftL(1L, nbytes * 8L) - 1L
+    INT_MIN <- 0L
+    NA_INT <- INT_MAX
+    
+    # Replace out-of-range values (they must be non-zero) with 1 and replace NAs
+    #  with the representation of NA for the specific storage mode. Note that
+    #  this is necessary because R internally stores logical values as integers.
+    x <- as.integer(x)
+    out.of.range <- (x == NA_INT | x < INT_MIN | x > INT_MAX)
+    x[out.of.range] <- 1L
+    x[is.na(x)] <- NA_INT
+    x
+  }
+  
   if(nbytes > 1)
     writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   else
@@ -364,18 +382,53 @@ as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
 as.mmap.integer <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
+  
+  # writeBin() simply overflows, so we need to do some preprocessing.
+  if(nbytes < 4L) {
+    if(attr(mode, "signed")) {
+      INT_MAX <- bitwShiftL(1L, nbytes * 8L - 1L) - 1L
+      INT_MIN <- -(INT_MAX + 1L)
+      NA_INT <- INT_MIN
+    } else {
+      INT_MAX <- bitwShiftL(1L, nbytes * 8L) - 1L
+      INT_MIN <- 0L
+      NA_INT <- INT_MAX
+    }
+    
+    # Replace out-of-range values and NAs with the representation of NA for the
+    #  specific storage mode. Display a warning if any values were out of range.
+    out.of.range <- (x == NA_INT | x < INT_MIN | x > INT_MAX)
+    if(any(out.of.range))
+      warning(paste("NAs introduced by coercion to", get.Ctype(mode), "range"))
+    x[out.of.range | is.na(x)] <- NA_INT
+    x
+  }
+  
   if(nbytes > 1)
     writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   else
     writeBin(x, file, size=nbytes)
   mmap(file, mode)
 }
+
 as.mmap.double <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
-  mmap(file, mode)
+  result <- mmap(file, mode)
+  
+  # writeBin() simply strips NaN payloads, so we need to do some postprocessing.
+  nas <- is.na(x) & !is.nan(x)
+  if(nbytes < 8L && any(nas)) {
+    # Since R doesn't have a 32-bit float type, and since any custom NaN payload
+    #  injected into a double will be lost when the double is eventually casted
+    #  to a float, we have to perform the logic in C code, i.e.`mmap_replace()`.
+    result[which(nas)] <- NA
+  }
+  
+  result
 }
+
 as.mmap.complex <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
@@ -386,6 +439,9 @@ as.mmap.complex <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
 as.mmap.character <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   payload.cap <- sizeof(mode) - 1
+  
+  # writeBin() doesn't support null-padded fixed-width strings and doesn't write
+  #  NAs in the way we want it to, so we need to do some preprocessing.
   nas <- is.na(x)
   x[!nas] <- normalize.encoding(x[!nas], attr(mode, "enc"))
   under.over.lengths.span <- if (all(nas)) c(0, 0) else range(nchar(x[!nas], type = "bytes") - payload.cap)
@@ -409,7 +465,7 @@ as.mmap.character <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
     x <- do.call(c, x)
   }
   
-  writeBin(x, file)
+  writeBin(x, file, useBytes=TRUE)
   mmap(file, mode)
 }
 
