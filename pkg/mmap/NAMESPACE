@@ -17,21 +17,21 @@ export(
        extractFUN, "extractFUN<-",
        replaceFUN, "replaceFUN<-",
 
-       bits,  # not yet implemented
-       logi8, logi32,
-       char,  int8,  int16,  int24,  int32,  
-       uchar, uint8, uint16, uint24, int64,
+       bitset,
+       bool8, bool32,
+       char,  int8,  int16,  int32,  
+       uchar, uint8, uint16, int64,
        real32, real64,
        cplx,
-       as.uchar, as.char, as.int8, as.uint8, as.int16, as.uint16, as.int24,
+       as.uchar, as.char, as.int8, as.uint8, as.int16, as.uint16,
        pad,
 
        struct,
-       as.struct,
        is.struct,
 
        as.Ctype,
        is.Ctype,
+       get.Ctype,
 
        dim.mmap, "dim<-.mmap",
        dimnames.mmap, "dimnames<-.mmap",
@@ -64,6 +64,7 @@ S3method(as.mmap, complex)
 S3method(as.mmap, double)
 S3method(as.mmap, integer)
 S3method(as.mmap, character)
+S3method(as.mmap, logical)
 
 # R object default conversion
 S3method(as.mmap, matrix)
@@ -71,7 +72,6 @@ S3method(as.mmap, data.frame)
 
 # methods to handle conversion to internal Ctype
 S3method("[[<-", struct)
-S3method(as.struct, default)
 S3method(as.Ctype, Ctype)
 S3method(as.Ctype, logical)
 S3method(as.Ctype, character)
@@ -79,13 +79,16 @@ S3method(as.Ctype, complex)
 S3method(as.Ctype, double)
 S3method(as.Ctype, integer)
 S3method(as.Ctype, raw)
+S3method(as.Ctype, NULL)
+S3method(as.Ctype, default)
 S3method(as.char, mmap)
 S3method(as.uchar, mmap)
 S3method(as.int8, mmap)
 S3method(as.uint8, mmap)
 S3method(as.int16, mmap)
 S3method(as.uint16, mmap)
-S3method(as.int24, mmap)
+
+S3method(get.Ctype, Ctype)
 
 S3method(sizeof, default)
 S3method(sizeof, Ctype)

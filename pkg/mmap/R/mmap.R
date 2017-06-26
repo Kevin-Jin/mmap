@@ -77,10 +77,10 @@ print.mmap <- function(x, ...) {
               }
   }
   if( !is.null(x$dim)) { # has dim
-  cat(paste("<mmap:",file_name,">  (",class(x$storage.mode)[2],") ",
+  cat(paste("<mmap:",file_name,">  (",get.Ctype(x$storage.mode),") ",
             type_name," [1:", nrow(x),", 1:", ncol(x),"]",sep=""),firstN,"...\n")
   } else {
-  cat(paste("<mmap:",file_name,">  (",class(x$storage.mode)[2],") ",
+  cat(paste("<mmap:",file_name,">  (",get.Ctype(x$storage.mode),") ",
             type_name," [1:", length(x),"]",sep=""),firstN,"...\n")
   }
 }
@@ -261,7 +261,7 @@ normalize.encoding <- function(x, to) {
       else if (sizeof(x$storage.mode[[j[fi]]]) > 1)
         swap.byte.order[fi] <- attr(x$storage.mode[[j[fi]]], "endian") != .Platform$endian
   } else if (inherits(x$storage.mode, "string")) {
-    value <- normalize.encoding(value, attr(x$storage.mode, "enc"))
+    value <- normalize.encoding(as.character(value), attr(x$storage.mode, "enc"))
   } else if (sizeof(x$storage.mode) > 1) {
     swap.byte.order <- attr(x$storage.mode, "endian") != .Platform$endian
   }
@@ -274,7 +274,7 @@ normalize.encoding <- function(x, to) {
 length.mmap <- function(x) {
   size_in_bytes <- sizeof(x)
   size <- sizeof(x$storage.mode)
-  if( class(x$storage.mode)[2] == 'bits')
+  if( get.Ctype(x$storage.mode) == "bitset")
     trunc(size_in_bytes/size) * 32L
   else
     trunc(size_in_bytes/size)
@@ -302,46 +302,88 @@ as.mmap <- function(x, mode, file,...) {
   UseMethod("as.mmap")
 }
 
-as.mmap.raw <- function(x, mode=raw(), file=tempmmap(), ...) {
+as.mmap.raw <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   writeBin(x, file)
   mmap(file, mode)
 }
 
-as.mmap.integer <- function(x,
-                            mode=integer(),
-                            file=tempmmap(),
-                            ...) {
+as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
+  
+  if(get.Ctype(mode) == "bitset") {
+    # Bitstring of all 1s except for the most significant bit, which is 0.
+    int.max.val <- as.integer(2 ^ 31 - 1)
+    
+    num.full.words <- length(x) %/% 32L
+    if (num.full.words > 0) {
+      # Subset the logical vector by full 32-bit words.
+      words <- unlist(lapply(1:num.full.words - 1, function(word.num) {
+        #word <- sum(bitwShiftL(1, which(!!x[1:31 + word.num * 32L]) - 1))
+        word <- sum(bitwShiftL(as.integer(!!x[1:31 + word.num * 32L]), 1:31 - 1))
+        
+        # `2^31` is interesting for two reasons: (1) it is R's representation
+        #  for NA_integer_, and (2) it is a negative number in 32-bit two's 
+        #  complement and R returns NA_integer_ upon overflow.
+        # Thus, if we need to set `2^31` (the "sign bit"), we have to be clever.
+        if(!x[32L + word.num * 32L]) {
+          word
+        } else if(word != int.max.val) {
+          # Negate the entire word so that the sign bit is set to 1, and then
+          #  negate again all bits besides the sign bit by exploiting the fact
+          #  that `xor(FALSE, TRUE) == TRUE && xor(TRUE, TRUE) == FALSE`.
+          bitwXor(bitwNot(word), int.max.val)
+        } else {
+          # Since `bitwNot(int.max.value) == NA_integer_`, we cannot use the
+          #  above hack. But since toggling the sign bit of `int.max.value`
+          #  results in the bitstring of all 1s, the result is trivial.
+          bitwNot(0)
+        }
+      }))
+    } else {
+      words <- integer(0)
+    }
+    
+    # Any remaining bits cannot make up a full word (or else they would've been
+    #  handled above) so we don't have to worry about avoiding NAs here.
+    rem <- length(x) %% 32L
+    if(rem != 0)
+      words <- c(words, sum(bitwShiftL(as.integer(!!tail(x, rem)), 1:rem - 1)))
+    
+    x <- words
+  }
+  
   nbytes <- sizeof(mode)
-  if(nbytes == 3)
-    writeBin(writeBin(x,raw())[1:(length(x)*4) %% 4 != 0], file, endian=attr(mode, "endian"))
-  else
+  if(nbytes > 1)
     writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
+  else
+    writeBin(x, file, size=nbytes)
   mmap(file, mode)
 }
-as.mmap.double <- function(x,
-                            mode=double(),
-                            file=tempmmap(),
-                            ...) {
+
+as.mmap.integer <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+  mode <- as.Ctype(mode)
+  nbytes <- sizeof(mode)
+  if(nbytes > 1)
+    writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
+  else
+    writeBin(x, file, size=nbytes)
+  mmap(file, mode)
+}
+as.mmap.double <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   mmap(file, mode)
 }
-as.mmap.complex <- function(x,
-                            mode=complex(),
-                            file=tempmmap(),
-                            ...) {
+as.mmap.complex <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   mmap(file, mode)
 }
 
-as.mmap.character <- function(x, 
-                              mode=char(sample=x),
-                              file=tempmmap(), ...) {
+as.mmap.character <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   payload.cap <- sizeof(mode) - 1
   nas <- is.na(x)
@@ -371,7 +413,7 @@ as.mmap.character <- function(x,
   mmap(file, mode)
 }
 
-as.mmap.matrix <- function(x, mode = as.Ctype(x), file=tempmmap(), ...) {
+as.mmap.matrix <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   DIM <- dim(x)
   dim(x) <- NULL
   x <- as.mmap(x, mode, file, ...)
@@ -379,14 +421,12 @@ as.mmap.matrix <- function(x, mode = as.Ctype(x), file=tempmmap(), ...) {
   x
 }
 
-as.mmap.data.frame <- function(x, mode, file, ...) {
+as.mmap.data.frame <- function(x, mode, file=tempmmap(), ...) {
   if( !missing(mode))
     warning("'mode' argument currently unsupported")
-  mode <- as.struct(x)
-  tmp <- tempfile()
-  writeBin(raw(sizeof(mode) * NROW(x)), tmp)
-  m <- mmap(tmp, mode, extractFUN=as.data.frame)
-  dimnames(m) <- list(NULL, colnames(x))
+  mode <- as.Ctype(x, ...)
+  writeBin(raw(sizeof(mode) * NROW(x)), file)
+  m <- mmap(file, mode, extractFUN=as.data.frame)
   for(i in 1:NCOL(x)) {
     m[,i] <- x[,i]
   }

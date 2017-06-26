@@ -85,46 +85,6 @@ test.uint16 <- function(on=TRUE) {
 
 
 
-#### int24() ####
-test.int24 <- function(on=TRUE) {
-  cat("checking test.int24...")
-  if( !isTRUE(on)) {
-    cat("test.int24 disabled\n")
-    return(NULL)
-  }
-  ints <- as.integer(seq(-8388607L,8388607L,length.out=11))
-  writeBin(rep(as.raw(0),33), tmp)
-  m <- mmap(tmp, int24())  # signed 3 byte integers
-  m[] <- ints
-  if( !all(m[] == ints) )
-    stop("m[] == ints")
-  munmap(m)
-  cat("OK\n")
-}
-
-
-
-
-#### uint24() ####
-test.uint24 <- function(on=TRUE) {
-  cat("checking test.uint24...")
-  if( !isTRUE(on)) {
-    cat("test.uint24 disabled\n")
-    return(NULL)
-  }
-  ints <- as.integer(seq(0,16777215L,length.out=100))
-  writeBin(rep(as.raw(0),300), tmp)
-  m <- mmap(tmp, uint24())  # signed 3 byte integers
-  m[] <- ints
-  if( !all(m[] == ints) )
-    stop("m[] == ints")
-  munmap(m)
-  cat("OK\n")
-}
-
-
-
-
 #### int32() ####
 test.int32 <- function(on=TRUE) {
   cat("checking test.int32...")
@@ -168,7 +128,5 @@ test.int8()
 test.uint8()
 test.int16()
 test.uint16()
-test.int24()
-test.uint24()
 test.int32()
 test.int64(FALSE)

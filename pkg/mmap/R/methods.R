@@ -34,25 +34,27 @@ dim.mmap <- function(x) {
   if( is.null(value)) {
     x$dim <- value
   } else
-  if( length(value) != 2) {
+  if( length(value) != 2)
     stop("only dimension of length two supported")
-  } else x$dim <- as.integer(value)
+  else
+    x$dim <- as.integer(value)
   x
 }
 
 dimnames.mmap <- function(x) {
   if( is.struct(x$storage.mode))
     list(NULL, names(x$storage.mode))
-  else x$dimnames
+  else
+    x$dimnames
 }
 
 `dimnames<-.mmap` <- function(x, value) {
   if( is.null(dim(x)))
     stop("'dimnames' applied to non-array")
-  if( is.struct(x$storage.mode)) {
+  if( is.struct(x$storage.mode))
     names(x$storage.mode) <- value[[2]]
+  else
     x$dimnames <- value
-  } else x$dimnames <- value
   x
 }
 
