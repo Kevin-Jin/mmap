@@ -1,15 +1,10 @@
 #include <R.h>
-#include <Rinternals.h>
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
-#include <assert.h>
-#define __STDC_LIMIT_MACROS
-#define __STDC_CONSTANT_MACROS
-#include <stdint.h>
 
 #include "mmap.h"
 
@@ -118,8 +113,8 @@ to the maintainer of the package.
 */
 
 /* initialize bitmask for bitset() type {{{*/
-int bitmask[32];
-int nbitmask[32];
+int32_t bitmask[32];
+int32_t nbitmask[32];
 
 void create_bitmask (void){
   int i;
@@ -258,18 +253,46 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
 
-  stat(CHAR(STRING_ELT(_fildesc,0)), &st);
-
-  HANDLE hFile=CreateFile(CHAR(STRING_ELT(_fildesc,0)),
+  stat(CHAR(asChar(_fildesc)), &st);
+  HANDLE hFile=CreateFile(CHAR(asChar(_fildesc)),
                   GENERIC_READ|GENERIC_WRITE,
                   FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);
+  if(hFile == INVALID_HANDLE_VALUE) {
+    LPTSTR errorText = NULL;
+    if(!FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL))
+      errorText = NULL;
+    if(NULL != errorText) {
+      error("unable to open file: %s", errorText);
+      LocalFree(errorText);
+    } else {
+      error("unable to open file: %d", GetLastError());
+    }
+  }
+  if((intptr_t)hFile > INT_MAX || (intptr_t)hFile < INT_MIN) {
+    CloseHandle(hFile);
+    error("unable to open file: file descriptor overflow");
+  }
 
-  HANDLE hMap=CreateFileMapping(hFile,NULL,PAGE_READWRITE,0,0,NULL);
-  DWORD dwFileSize=GetFileSize(hFile,NULL);
-  data = (char *)MapViewOfFile(hMap,FILE_MAP_WRITE,0,0,dwFileSize);
-  /* advance ptr to byte offset from page boundary - shouldn't we do this above?? JR */
-  data = data + asInteger(_off) + asInteger(_pageoff); 
-
+  HANDLE hMap = CreateFileMapping(hFile, NULL, asInteger(_prot), 0, 0, NULL);
+  if((intptr_t)hMap > INT_MAX || (intptr_t)hMap < INT_MIN) {
+    CloseHandle(hMap);
+    error("unable to mmap file: map handle overflow");
+  }
+  ULARGE_INTEGER off = {.QuadPart  = (uint64_t)asReal(_off)};
+  data = (char *)MapViewOfFile(hMap, FILE_MAP_WRITE, off.HighPart, off.LowPart, (SIZE_T)asReal(_len) + asInteger(_pageoff));
+  if(data == NULL) {
+    LPTSTR errorText = NULL;
+    if(!FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL))
+      errorText = NULL;
+    if(NULL != errorText) {
+      error("unable to mmap file: %s", errorText);
+      LocalFree(errorText);
+    } else {
+      error("unable to mmap file: %d", GetLastError());
+    }
+  }
+  
+  data = data + asInteger(_pageoff); /* advance ptr to byte offset from page boundary */
 
   SEXP mmap_obj;
   PROTECT(mmap_obj = allocSExp(ENVSXP));
@@ -280,10 +303,9 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue),mmap_obj);
   //defineVar(install("bytes"), ScalarReal(asReal(_len)-asInteger(_off)-asInteger(_pageoff)),mmap_obj);
   defineVar(install("bytes"), _len,mmap_obj);
-  defineVar(install("filedesc"), ScalarInteger((int)hFile),mmap_obj);
+  defineVar(install("filedesc"), ScalarInteger((int)(intptr_t)hFile),mmap_obj);
   defineVar(install("storage.mode"), _type,mmap_obj);
-  defineVar(install("pagesize"), ScalarReal((double)sSysInfo.dwPageSize),mmap_obj);
-  defineVar(install("handle"), ScalarInteger((int)hMap),mmap_obj);
+  defineVar(install("handle"), ScalarInteger((int)(intptr_t)hMap),mmap_obj);
   defineVar(install("dim"), R_NilValue ,mmap_obj);
   UNPROTECT(1);
   return(mmap_obj);
@@ -295,19 +317,20 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   char *data;
   struct stat st;
 
-  stat(CHAR(STRING_ELT(_fildesc,0)), &st);
-  fd = open(CHAR(STRING_ELT(_fildesc,0)), O_RDWR);
+  stat(CHAR(asChar(_fildesc)), &st);
+  fd = open(CHAR(asChar(_fildesc)), O_RDWR);
   if(fd < 0)
-    error("unable to open file");
+    error("unable to open file: %s", strerror(errno));
+  
   data = mmap((caddr_t)0, 
-              (size_t)REAL(_len)[0], 
-              INTEGER(_prot)[0], 
-              INTEGER(_flags)[0], 
+              (size_t)asReal(_len) + asInteger(_pageoff), 
+              asInteger(_prot), 
+              asInteger(_flags), 
               fd, 
-              INTEGER(_off)[0]);
-
+              (off_t)asReal(_off));
   if(data == MAP_FAILED)
-    error("unable to mmap file");
+    error("unable to mmap file: %s", strerror(errno));
+  
   data = data + asInteger(_pageoff); /* advance ptr to byte offset from page boundary */
   
   SEXP mmap_obj;
@@ -321,7 +344,6 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   defineVar(install("bytes"), _len,mmap_obj);
   defineVar(install("filedesc"), ScalarInteger(fd),mmap_obj);
   defineVar(install("storage.mode"), _type,mmap_obj);
-  defineVar(install("pagesize"), ScalarReal((double)sysconf(_SC_PAGE_SIZE)),mmap_obj);
   defineVar(install("dim"), R_NilValue ,mmap_obj);
   UNPROTECT(1);
   return(mmap_obj);
@@ -333,7 +355,7 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
 SEXP mmap_pagesize () {
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
-  return ScalarInteger((int)sSysInfo.dwPageSize);
+  return ScalarInteger((int)sSysInfo.dwAllocationGranularity);
 }
 #else
 SEXP mmap_pagesize () {
@@ -372,9 +394,9 @@ SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
 SEXP mmap_madvise (SEXP mmap_obj, SEXP _len, SEXP _flags) {
   /* function needs to allow for data to be an offset, else
      we can't control anything of value... */
+#ifdef HAVE_MADVISE
   char *data;
   data = MMAP_DATA(mmap_obj);
-#ifdef HAVE_MADVISE
   int ret = madvise(data, INTEGER(_len)[0], INTEGER(_flags)[0]);
 #else
   int ret = -1;
@@ -386,13 +408,15 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP _len, SEXP _flags) {
 SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP prot) {
   int i, LEN;
   size_t ival, upper_bound;
+#ifndef WIN32
   char *data, *addr;
 
   data = MMAP_DATA(mmap_obj);
+  int pagesize = asInteger(mmap_pagesize());
+#endif
   LEN = length(index);
 
   SEXP ret; PROTECT(ret = allocVector(INTSXP, LEN));
-  int pagesize = MMAP_PAGESIZE(mmap_obj);
   
   upper_bound = (MMAP_SIZE(mmap_obj)-sizeof(int));
   for(i=0;i<LEN;i++) {
@@ -401,15 +425,19 @@ SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP prot) {
       error("'i=%i' out of bounds", i);
     
 /* Rprintf("offset: %i\n",(ival/pagesize)*pagesize); */
+#ifndef WIN32
     addr = &(data[(int)((ival/pagesize)*pagesize)]);
     INTEGER(ret)[i] = mprotect(addr, ((ival/pagesize)*pagesize)*2, INTEGER(prot)[0]);
+#else
+    INTEGER(ret)[i] = -1;
+#endif
   }
   UNPROTECT(1);
   return ret;
 }/*}}}*/
 
-void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+void logical_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   int *lgl_dat;
   int8_t bytebuf;
   int32_t intbuf;
@@ -418,7 +446,7 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   lgl_dat = LOGICAL(dat);
   if(strcmp(SMODE_CTYPE(smode), "bitset") == 0) { /* bitset */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       // Note that we can store 32 values in each word.
       if(u >= mmap_len * 32 || u < 0)
         error("'i=%i' out of bounds", u + 1);
@@ -436,7 +464,7 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
     switch(SMODE_CBYTES(smode)) {
     case 1: /* bool8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -449,7 +477,7 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
       break;
     case 4: /* bool32 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -467,8 +495,8 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   }
 }
 
-void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+void integer_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   int *int_dat;
   int8_t bytebuf;
   int16_t sbuf;
@@ -479,7 +507,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   case 1:
     if(SMODE_SIGNED(smode)) { /* int8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -491,7 +519,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
       }
     } else { /* uint8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -506,7 +534,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   case 2:
     if(SMODE_SIGNED(smode)) { /* int16 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -520,7 +548,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
       }
     } else { /* uint16 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -536,7 +564,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
     break;
   case 4: /* int32 */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -553,8 +581,8 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   }
 }
 
-void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+void double_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   double *real_dat;
   int64_t longbuf;
   float floatbuf;
@@ -564,7 +592,7 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
   switch(SMODE_CBYTES(smode)) {
   case 4: /* real32 */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -581,7 +609,7 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
     if(strcmp(SMODE_CTYPE(smode), "int64") == 0) { /* int64 */
       /* casting from int64 to R double to minimize precision loss */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -595,7 +623,7 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
       }
     } else { /* real64 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -612,15 +640,15 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
   }
 }
 
-void complex_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, int swap) {
-  int i, u;
+void complex_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, int swap) {
+  R_xlen_t i, u;
   Rcomplex *complex_dat;
   double doublepairbuf[2];
   Rcomplex Rcomplexbuf;
   
   complex_dat = COMPLEX(dat);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -646,15 +674,14 @@ void complex_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   }
 }
 
-void character_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode) {
-  int i, u, fieldCbytes, hasnul;
+void character_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode) {
+  R_xlen_t i, u, fieldCbytes;
   char *str;
   
   fieldCbytes = SMODE_CBYTES(smode);
-  hasnul = !!SMODE_NUL_TERM(smode);
-  if(hasnul) {
+  if(SMODE_NUL_TERM(smode)) {
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -666,7 +693,7 @@ void character_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int
     }
   } else {  /* nul-padded char array */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -679,13 +706,13 @@ void character_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int
   }
 }
 
-void raw_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset) {
-  int i, u;
+void raw_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset) {
+  R_xlen_t i, u;
   Rbyte *raw_dat;
 
   raw_dat = RAW(dat);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -696,17 +723,17 @@ void raw_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_
 /* {{{ mmap_extract */
 SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_byte_order) {
 /*SEXP mmap_extract (SEXP index, SEXP field, SEXP mmap_obj) {*/
-  long v, fi;
+  R_xlen_t v, fi;
   int P = 0;
-  unsigned char *data; /* unsigned int and values */
+  unsigned char *data;
 
-  PROTECT(index = coerceVector(index, INTSXP)); P++;
-  PROTECT(field = coerceVector(field, INTSXP)); P++;
+  PROTECT(index = coerceVector(index, REALSXP)); P++;
+  PROTECT(field = coerceVector(field, REALSXP)); P++;
   SEXP vec_smode, smode = MMAP_SMODE(mmap_obj);
-  int LEN = length(index);
-  int mode = TYPEOF(smode);
-  int Cbytes = SMODE_CBYTES(smode);
-  int mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  R_xlen_t LEN = xlength(index);
+  SEXPTYPE mode = TYPEOF(smode);
+  R_xlen_t Cbytes = SMODE_CBYTES(smode);
+  R_xlen_t mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
 
   data = MMAP_DATA(mmap_obj);
   if(data == NULL)
@@ -714,14 +741,14 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
 
   SEXP dat; /* dat is either a column, or list of columns */
   if(mode == VECSXP)
-    PROTECT(dat = allocVector(VECSXP, length(field)));
+    PROTECT(dat = allocVector(VECSXP, xlength(field)));
   else
     PROTECT(dat = allocVector(mode, LEN));
   P++;
 
-  int *index_p = INTEGER(index);
+  double *index_p = REAL(index);
 
-  int offset;
+  R_xlen_t offset;
   SEXP vec_dat;
 
   switch(mode) {
@@ -744,8 +771,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     raw_extract(data, dat, LEN, index_p, mmap_len, Cbytes, 0);
     break; /* }}} */
   case VECSXP:  /* corresponds to C struct for mmap package {{{ */
-    for(fi = 0; fi < length(field); fi++) {
-      v = INTEGER(field)[fi] - 1;
+    for(fi = 0; fi < xlength(field); fi++) {
+      v = (R_xlen_t)REAL(field)[fi] - 1;
       offset = SMODE_OFFSET(smode, v);
       vec_smode = VECTOR_ELT(smode, v);
       switch(TYPEOF(vec_smode)) {
@@ -801,8 +828,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
   return dat;
 }/*}}}*/
 
-void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+void logical_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   int *lgl_value;
   int32_t intbuf;
   div_t word;
@@ -810,7 +837,7 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   lgl_value = LOGICAL(value);
   if(strcmp(SMODE_CTYPE(smode), "bitset") == 0) {  /* bitset */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       // Note that we can store 32 values in each word.
       if(u >= mmap_len * 32 || u < 0)
         error("'i=%i' out of bounds", u + 1);
@@ -838,7 +865,7 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
     switch(SMODE_CBYTES(smode)) {
     case 1: /* bool8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -867,7 +894,7 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
       break;
     case 4: /* bool32 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -885,8 +912,8 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   }
 }
 
-void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+void integer_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   int *int_value;
   int16_t sbuf;
   int32_t intbuf;
@@ -896,7 +923,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   case 1:
     if(SMODE_SIGNED(smode)) { /* int8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -914,7 +941,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
       }
     } else { /* uint8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -935,7 +962,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   case 2:
     if(SMODE_SIGNED(smode)) { /* int16 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -956,7 +983,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
       }
     } else { /* uint16 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -979,7 +1006,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
     break;
   case 4: /* int32 */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -996,8 +1023,8 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   }
 }
 
-void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+void double_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   double *real_value;
   int64_t longbuf;
   float floatbuf;
@@ -1007,7 +1034,7 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
   switch(SMODE_CBYTES(smode)) {
   case 4: /* real32 */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -1025,7 +1052,7 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
   case 8:
     if(strcmp(SMODE_CTYPE(smode), "int64") == 0) { /* int64 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -1057,7 +1084,7 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
       }
     } else { /* real64 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -1072,15 +1099,15 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
   }
 }
 
-void complex_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, int swap) {
-  int i, u;
+void complex_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, int swap) {
+  R_xlen_t i, u;
   Rcomplex *complex_value;
   double doublepairbuf[2];
   Rcomplex Rcomplexbuf;
   
   complex_value = COMPLEX(value);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -1095,13 +1122,15 @@ void complex_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   }
 }
 
-void character_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode) {
-  int i, u, fieldCbytes, hasnul, charsxp_len;
+void character_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode) {
+  R_xlen_t i, u, fieldCbytes;
+  R_len_t charsxp_len;
+  int hasnul;
   
   fieldCbytes = SMODE_CBYTES(smode);
   hasnul = !!SMODE_NUL_TERM(smode);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -1122,13 +1151,13 @@ void character_replace(unsigned char *data, SEXP value, int LEN, int *index_p, i
   }
 }
 
-void raw_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset) {
-  int i, u;
+void raw_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset) {
+  R_xlen_t i, u;
   Rbyte *raw_value;
   
   raw_value = RAW(value);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -1138,13 +1167,13 @@ void raw_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mma
 
 /* mmap_replace {{{ */
 SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_byte_order) {
-  int v, fi, offset;
+  R_xlen_t v, fi, offset;
   unsigned char *data;
-  int LEN = length(index);
+  R_xlen_t LEN = xlength(index);
   SEXP vec_smode, smode = MMAP_SMODE(mmap_obj);
-  int mode = TYPEOF(smode);
-  int Cbytes = SMODE_CBYTES(smode);
-  int mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  SEXPTYPE mode = TYPEOF(smode);
+  R_xlen_t Cbytes = SMODE_CBYTES(smode);
+  R_xlen_t mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
   int P = 0;
   SEXP vec_value;
   
@@ -1154,13 +1183,13 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
 
   if(mode != VECSXP) {
     PROTECT(value = coerceVector(value, mode)); P++;
-    if (length(value) != LEN)
+    if (xlength(value) != LEN)
       // Code on R side failed to properly handle the recycling.
       error("size of struct and size of replacement value do not match");
   }
-  PROTECT(index = coerceVector(index, INTSXP)); P++;
-  PROTECT(field = coerceVector(field, INTSXP)); P++;
-  int *index_p = INTEGER(index);
+  PROTECT(index = coerceVector(index, REALSXP)); P++;
+  PROTECT(field = coerceVector(field, REALSXP)); P++;
+  double *index_p = REAL(index);
   switch(mode) {
   case LGLSXP:
     logical_replace(data, value, LEN, index_p, mmap_len, Cbytes, 0, smode, asLogical(swap_byte_order));
@@ -1181,15 +1210,15 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
     raw_replace(data, value, LEN, index_p, mmap_len, Cbytes, 0);
     break;
   case VECSXP: /* aka "struct"{{{ */
-    if(length(value) != length(field))
+    if(xlength(value) != xlength(field))
       // Code on R side failed to properly handle the recycling.
       error("size of struct and size of replacement value do not match");
-    for(fi = 0; fi < length(field); fi++) {
-      v = INTEGER(field)[fi] - 1;
+    for(fi = 0; fi < xlength(field); fi++) {
+      v = (R_xlen_t)REAL(field)[fi] - 1;
       offset = SMODE_OFFSET(smode, v);
       vec_smode = VECTOR_ELT(smode, v);
       vec_value = VECTOR_ELT(value, fi);
-      if (length(vec_value) != LEN)
+      if (xlength(vec_value) != LEN)
         // Code on R side failed to properly handle the recycling.
         error("size of struct and size of replacement value do not match");
       switch(TYPEOF(vec_smode)) {

@@ -2,20 +2,24 @@
 #include <Rinternals.h>
 #include "config.h"
 
+#include <assert.h>
+#define __STDC_LIMIT_MACROS
+#define __STDC_CONSTANT_MACROS
+#include <stdint.h>
+
 /*
   new access macros for environment mmap_obj to facilitate finalizer
 */
 
 #define MMAP_DATA(mmap_object)        R_ExternalPtrAddr(findVar(install("data"),mmap_object))
-#define MMAP_SIZE(mmap_object)        asInteger(findVar(install("bytes"),mmap_object))
-#define MMAP_FD(mmap_object)          asInteger(findVar(install("filedesc"),mmap_object))
+#define MMAP_SIZE(mmap_object)        ((R_xlen_t)asReal(findVar(install("bytes"),mmap_object)))
+#define MMAP_FD(mmap_object)          ((intptr_t)asInteger(findVar(install("filedesc"),mmap_object)))
 #define MMAP_SMODE(mmap_object)       findVar(install("storage.mode"),mmap_object)
 #define SMODE_CTYPE(smode)            CHAR(STRING_ELT(getAttrib(smode, R_ClassSymbol),0)) /* get.Ctype() */
-#define SMODE_CBYTES(smode)           asInteger(getAttrib(smode,install("bytes")))
+#define SMODE_CBYTES(smode)           ((R_xlen_t)asReal(getAttrib(smode,install("bytes"))))
 #define SMODE_SIGNED(smode)           asLogical(getAttrib(smode,install("signed")))
-#define SMODE_OFFSET(smode,i)         INTEGER(getAttrib(smode,install("offset")))[i]
+#define SMODE_OFFSET(smode,i)         ((R_xlen_t)REAL(coerceVector(getAttrib(smode,install("offset")),REALSXP))[i])
 #define SMODE_NUL_TERM(smode)         (isNull(getAttrib(smode,install("nul"))) || asLogical(getAttrib(smode,install("nul"))))
-#define MMAP_PAGESIZE(mmap_object)    asInteger(findVar(install("pagesize"),mmap_object))
 #define MMAP_DIM(mmap_object)         findVar(install("dim"),mmap_object)
 #define MMAP_SYNC(mmap_object)        asInteger(VECTOR_ELT(mmap_object,4))
 
@@ -37,7 +41,7 @@
 
 #ifdef WIN32
 /*#define MMAP_HANDLE(mmap_object)      INTEGER(VECTOR_ELT(mmap_object,5))[0]*/
-#define MMAP_HANDLE(mmap_object)      INTEGER(findVar(install("handle"),mmap_object))[0]
+#define MMAP_HANDLE(mmap_object)      ((intptr_t)asInteger((findVar(install("handle"),mmap_object))))
 /* Definitions from the Linux kernel source 2.6.35.7 */
 #define PROT_READ       0x1             /* page can be read */
 #define PROT_WRITE      0x2             /* page can be written */

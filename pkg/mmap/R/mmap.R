@@ -116,6 +116,8 @@ mmap <- function(file, mode=int32(),
     off <- off - pageoff
     if(missing(len))
       len <- file.info(file)$size - off - pageoff
+    else
+      len <- min(file.info(file)$size - off - pageoff, len)
     
     mmap_obj <- .Call("mmap_mmap", 
                       as.Ctype(mode),
@@ -123,7 +125,7 @@ mmap <- function(file, mode=int32(),
                       as.integer(prot), 
                       as.integer(flags), 
                       as.double(len),
-                      as.integer(off),
+                      as.double(off),
                       as.integer(pageoff),
                       PKG="mmap")
     reg.finalizer(mmap_obj, mmap_finalizer, TRUE)
@@ -193,7 +195,7 @@ is.mmap <- function(x) {
   } else if (!inherits(x$storage.mode, "string") && sizeof(x$storage.mode) > 1) {
     swap.byte.order <- attr(x$storage.mode, "endian") != .Platform$endian
   }
-  xx <- .Call("mmap_extract", i, as.integer(j), DIM, x, swap.byte.order, PKG="mmap")
+  xx <- .Call("mmap_extract", i, j, DIM, x, swap.byte.order, PKG="mmap")
   names(xx) <- names(x$storage.mode)[j]
   if (is.struct(x$storage.mode)) {
     for (fi in 1:length(j))
