@@ -67,8 +67,10 @@ string <- function(length=NULL, enc=NULL, nul=TRUE, sample=NULL) {
       length <- max(nchar(sample[!is.na(sample)], type = "bytes"))
     }
   } else {
-    enc <- "latin1"
-    length <- 0
+    if (is.null(enc))
+      enc <- "latin1"
+    if (is.null(length))
+      length <- 0
   }
   structure(character(0), bytes=as.integer(max(length,1)+!!nul),
             enc=enc, nul=nul, class=c("string","Ctype"))
