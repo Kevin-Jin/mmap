@@ -39,14 +39,14 @@ str.mmap <- function (object, ...)
     print(object)
     cat("  data         :") 
     str(object$data)
+    cat("  pageoff      :") 
+    str(object$pageoff)
     cat("  bytes        :")
     str(object$bytes)
     cat("  filedesc     :")
     str(object$filedesc)
     cat("  storage.mode :") 
     str(object$storage.mode)
-    cat("  pagesize     :")
-    str(object$pagesize)
     cat("  dim          :")
     print(object$dim)
 }
@@ -112,7 +112,7 @@ mmap <- function(file, mode=int32(),
     # pageoff is the offset from page boundary
     # off is the page-aligned offset
     #   e.g. off=22 would set off=0 and pageoff=22 on a system with 4096 page sizing
-    pageoff <- off %% pagesize()
+    pageoff <- off %% allocation.granularity()
     off <- off - pageoff
     if(missing(len))
       len <- file.info(file)$size - off - pageoff
@@ -155,10 +155,21 @@ msync <- function(x, flags=mmapFlags("MS_ASYNC")) {
 }
 
 mprotect <- function(x, i, prot) {
-  # i indicates the start and length of protection
-
-  # TODO: add ability to protect multiple pages in a
-  # range
+  if(!is.mmap(x))
+    stop("mmap object required to munmap")
+  # # Assuming i is the sequence of targeted record numbers (1-indexed):
+  # # Ranges of targeted memory offsets (relative to the address of the first page) can be found by
+  # r <- cbind((i - 1) * sizeof(x$storage.mode) + x$pageoff, i * sizeof(x$storage.mode) + x$pageoff - 1)
+  # # Ranges of affected page numbers (0-indexed) can be found by
+  # s <- floor(r / pagesize()) # round to -Inf, not round to 0!
+  # # Sequence of affected page numbers (0-indexed) can be found by
+  # u <- unique(do.call(c, as.list(apply(s, 1, function(range) range[1]:range[2]))))
+  # # Ranges of affected memory offsets (relative to the address of the first record) can be found by
+  # v <- cbind(u * pagesize() - x$pageoff, (u + 1) * pagesize() - x$pageoff - 1)
+  # # Ranges of affected record numbers (1-indexed) can be found by
+  # w <- floor(v / sizeof(x$storage.mode)) + 1 # round to -Inf, not round to 0!
+  # # Sequence of affected record numbers can be found by
+  # z <- unique(do.call(c, as.list(apply(w, 1, function(range) range[1]:range[2]))))
   .Call("mmap_mprotect", x, i, prot, PKG="mmap")
 }
 
@@ -498,4 +509,8 @@ tempmmap <- function(tmpdir=tempdir()) {
 
 pagesize <- function() {
   .Call("mmap_pagesize")
+}
+
+allocation.granularity <- function() {
+  .Call("mmap_allocation_granularity")
 }

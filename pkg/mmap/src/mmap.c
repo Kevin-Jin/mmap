@@ -205,46 +205,74 @@ SEXP mmap_mkFlags (SEXP _flags) {
 
 /* mmap_munmap {{{ */
 #ifdef WIN32
+void rperror(const char *format) {
+  LPTSTR errorText = NULL;
+  if(FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL) && errorText != NULL) {
+    error(format, errorText);
+    LocalFree(errorText);
+  }
+}
+
+void rpwarning(const char *format) {
+  LPTSTR errorText = NULL;
+  if(FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL) && errorText != NULL) {
+    warning(format, errorText);
+    LocalFree(errorText);
+  }
+}
+
 SEXP mmap_munmap (SEXP mmap_obj) {
-  int ret;
+  int success;
   char *data = MMAP_DATA(mmap_obj);
   HANDLE fd = (HANDLE)MMAP_FD(mmap_obj);
   HANDLE mh = (HANDLE)MMAP_HANDLE(mmap_obj);
+  int pageoff = MMAP_PAGEOFF(mmap_obj);
 
-  if(data == NULL)
-    error("invalid mmap pointer");
+  if(data == NULL) {
+    success = 0;
+    warning("unable to munmap file: invalid mmap pointer");
+  } else {
+    success = !!UnmapViewOfFile((char *)(data - pageoff));
+    if(!success)
+      rpwarning("unable to munmap file: %s");
+  }
 
-  ret = UnmapViewOfFile(data);
   CloseHandle(mh);
   CloseHandle(fd);
   R_ClearExternalPtr(findVar(install("data"),mmap_obj));
-  return(ScalarInteger(ret));
+  return(ScalarLogical(success));
 }
 #else
+void rperror(const char *format) {
+  error(format, strerror(errno));
+}
+
+void rpwarning(const char *format) {
+  warning(format, strerror(errno));
+}
+
 SEXP mmap_munmap (SEXP mmap_obj) {
+  int success;
   char *data = MMAP_DATA(mmap_obj);
   int fd = MMAP_FD(mmap_obj);
+  int pageoff = MMAP_PAGEOFF(mmap_obj);
 
-  if(data == NULL)
-    error("invalid mmap pointer");
+  if(data == NULL) {
+    success = 0;
+    warning("unable to munmap file: invalid mmap pointer");
+  } else {
+    success = !munmap((char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff));
+    if(!success)
+      rpwarning("unable to munmap file: %s");
+  }
 
-  int ret = munmap(data, MMAP_SIZE(mmap_obj));
-  close(fd); /* should be moved back to R */
-  //R_ClearExternalPtr(VECTOR_ELT(mmap_obj,0));
+  close(fd);
   R_ClearExternalPtr(findVar(install("data"),mmap_obj));
-  /*R_ClearExternalPtr(MMAP_DATA(mmap_obj));*/
-  return(ScalarInteger(ret)); 
+  return(ScalarLogical(success)); 
 } /*}}}*/
-
-/*
-void mmap_finalizer (SEXP mmap_obj) {
-  Rprintf("mmap_finalizer called\n");
-  mmap_munmap((SEXP)R_ExternalPtrAddr(mmap_obj));
-}
-*/
 #endif
 
-/* mmap_mmap AND mmap_finalizer {{{ */
+/* mmap_mmap {{{ */
 #ifdef WIN32
 SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
                 SEXP _flags, SEXP _len, SEXP _off, SEXP _pageoff) {
@@ -252,44 +280,46 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   struct stat st;
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
-
+  
+  // Give the system's most permissive access to `CreateFile()` first so that we
+  //  can give the most permissive protections to `CreateFileMapping()` and the
+  //  most permissive access to `MapViewOfFile()`.
+  // Then we can grant more permissions of the pointer at any time without a
+  //  problem through `VirtualProtect()` in `mmap_mprotect()`. Otherwise, we
+  //  could only deny existing permissions later but not grant new ones.
   stat(CHAR(asChar(_fildesc)), &st);
   HANDLE hFile=CreateFile(CHAR(asChar(_fildesc)),
-                  GENERIC_READ|GENERIC_WRITE,
-                  FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);
-  if(hFile == INVALID_HANDLE_VALUE) {
-    LPTSTR errorText = NULL;
-    if(!FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL))
-      errorText = NULL;
-    if(NULL != errorText) {
-      error("unable to open file: %s", errorText);
-      LocalFree(errorText);
-    } else {
-      error("unable to open file: %d", GetLastError());
-    }
-  }
+                  GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
+                  FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+  if(hFile == INVALID_HANDLE_VALUE)
+    rperror("unable to open file: %s");
   if((intptr_t)hFile > INT_MAX || (intptr_t)hFile < INT_MIN) {
     CloseHandle(hFile);
     error("unable to open file: file descriptor overflow");
   }
 
-  HANDLE hMap = CreateFileMapping(hFile, NULL, asInteger(_prot), 0, 0, NULL);
+  DWORD prot = PAGE_EXECUTE_READWRITE;
+  HANDLE hMap = CreateFileMapping(hFile, NULL, prot, 0, 0, NULL);
+  if(hMap == NULL) {
+    CloseHandle(hFile);
+    rperror("unable to mmap file: %s");
+  }
   if((intptr_t)hMap > INT_MAX || (intptr_t)hMap < INT_MIN) {
     CloseHandle(hMap);
+    CloseHandle(hFile);
     error("unable to mmap file: map handle overflow");
   }
   ULARGE_INTEGER off = {.QuadPart  = (uint64_t)asReal(_off)};
-  data = (char *)MapViewOfFile(hMap, FILE_MAP_WRITE, off.HighPart, off.LowPart, (SIZE_T)asReal(_len) + asInteger(_pageoff));
+  data = (char *)MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE, off.HighPart, off.LowPart, (SIZE_T)asReal(_len) + asInteger(_pageoff));
   if(data == NULL) {
-    LPTSTR errorText = NULL;
-    if(!FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL))
-      errorText = NULL;
-    if(NULL != errorText) {
-      error("unable to mmap file: %s", errorText);
-      LocalFree(errorText);
-    } else {
-      error("unable to mmap file: %d", GetLastError());
-    }
+    CloseHandle(hMap);
+    CloseHandle(hFile);
+    rperror("unable to mmap file: %s");
+  }
+  if(!VirtualProtect(data, (SIZE_T)asReal(_len) + asInteger(_pageoff), asInteger(_prot), &prot)) {
+    CloseHandle(hMap);
+    CloseHandle(hFile);
+    rperror("unable to mmap file: %s");
   }
   
   data = data + asInteger(_pageoff); /* advance ptr to byte offset from page boundary */
@@ -301,7 +331,7 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   SET_HASHTAB(mmap_obj, R_NilValue);
   SET_ATTRIB(mmap_obj, R_NilValue);
   defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue),mmap_obj);
-  //defineVar(install("bytes"), ScalarReal(asReal(_len)-asInteger(_off)-asInteger(_pageoff)),mmap_obj);
+  defineVar(install("pageoff"), _pageoff,mmap_obj);
   defineVar(install("bytes"), _len,mmap_obj);
   defineVar(install("filedesc"), ScalarInteger((int)(intptr_t)hFile),mmap_obj);
   defineVar(install("storage.mode"), _type,mmap_obj);
@@ -320,7 +350,7 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   stat(CHAR(asChar(_fildesc)), &st);
   fd = open(CHAR(asChar(_fildesc)), O_RDWR);
   if(fd < 0)
-    error("unable to open file: %s", strerror(errno));
+    rperror("unable to open file: %s");
   
   data = mmap((caddr_t)0, 
               (size_t)asReal(_len) + asInteger(_pageoff), 
@@ -328,8 +358,10 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
               asInteger(_flags), 
               fd, 
               (off_t)asReal(_off));
-  if(data == MAP_FAILED)
-    error("unable to mmap file: %s", strerror(errno));
+  if(data == MAP_FAILED) {
+    close(fd);
+    rperror("unable to mmap file: %s");
+  }
   
   data = data + asInteger(_pageoff); /* advance ptr to byte offset from page boundary */
   
@@ -340,7 +372,7 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   SET_HASHTAB(mmap_obj, R_NilValue);
   SET_ATTRIB(mmap_obj, R_NilValue);
   defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue),mmap_obj);
-  //defineVar(install("bytes"), ScalarReal(asReal(_len)-asInteger(_off)-asInteger(_pageoff)),mmap_obj);
+  defineVar(install("pageoff"), _pageoff,mmap_obj);
   defineVar(install("bytes"), _len,mmap_obj);
   defineVar(install("filedesc"), ScalarInteger(fd),mmap_obj);
   defineVar(install("storage.mode"), _type,mmap_obj);
@@ -355,11 +387,21 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
 SEXP mmap_pagesize () {
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
+  return ScalarInteger((int)sSysInfo.dwPageSize);
+}
+
+SEXP mmap_allocation_granularity () {
+  SYSTEM_INFO sSysInfo;
+  GetSystemInfo(&sSysInfo);
   return ScalarInteger((int)sSysInfo.dwAllocationGranularity);
 }
 #else
 SEXP mmap_pagesize () {
   return ScalarInteger((int)sysconf(_SC_PAGE_SIZE));
+}
+
+SEXP mmap_allocation_granularity () {
+  return mmap_pagesize();
 }
 #endif
 /*}}}*/
@@ -367,10 +409,7 @@ SEXP mmap_pagesize () {
 /* mmap_is_mmapped {{{ */
 SEXP mmap_is_mmapped (SEXP mmap_obj) {
   char *data = MMAP_DATA(mmap_obj);
-  if(data == NULL)
-    return(ScalarLogical(0));
-
-  return(ScalarLogical(1));
+  return(ScalarLogical(data != NULL));
 } /*}}}*/
 
 #ifdef WIN32
@@ -378,15 +417,32 @@ SEXP mmap_is_mmapped (SEXP mmap_obj) {
 SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
   char *data;
   data = MMAP_DATA(mmap_obj);
-  FlushViewOfFile((void *)data, (size_t)MMAP_SIZE(mmap_obj));
-  return 0;
+  int success = !!FlushViewOfFile((void *)data, (size_t)MMAP_SIZE(mmap_obj));
+  if(!success) {
+    rpwarning("unable to msync file: %s");
+  } else {
+    // "When modifying a file through a mapped view, the last modification
+    //  timestamp may not be updated automatically."
+    // Ideally, we would only update the modification time if the file were
+    //  dirty, but there is no easy way to check except to maintain additional
+    //  state ourselves, which is overkill for just updating the file metadata.
+    FILETIME ft;
+    SYSTEMTIME st;
+    GetSystemTime(&st);
+    if(!SystemTimeToFileTime(&st, &ft) || !SetFileTime((HANDLE)MMAP_FD(mmap_obj), (LPFILETIME)NULL, (LPFILETIME)NULL, &ft))
+      rpwarning("unable to msync file: %s");
+  }
+  
+  return ScalarLogical(success);
 }
 #else
 SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
   char *data;
   data = MMAP_DATA(mmap_obj);
-  int ret = msync(data, MMAP_SIZE(mmap_obj), INTEGER(_flags)[0]);
-  return ScalarInteger(ret);
+  int success = !msync(data, MMAP_SIZE(mmap_obj), INTEGER(_flags)[0]);
+  if(!success)
+    rpwarning("unable to msync file: %s");
+  return ScalarLogical(success);
 }/*}}}*/
 #endif
 
@@ -397,43 +453,68 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP _len, SEXP _flags) {
 #ifdef HAVE_MADVISE
   char *data;
   data = MMAP_DATA(mmap_obj);
-  int ret = madvise(data, INTEGER(_len)[0], INTEGER(_flags)[0]);
+  int success = !madvise(data, INTEGER(_len)[0], INTEGER(_flags)[0]);
+  if(!success)
+    rpwarning("unable to madvise file: %s");
 #else
-  int ret = -1;
+  // TODO: support passing madvise() flags to mmap() so that we can set
+  //  dwFlagsAndAttributes for CreateFile(). In particular,
+  //  FILE_ATTRIBUTE_NORMAL corresponds to MADV_NORMAL,
+  //  FILE_FLAG_SEQUENTIAL_SCAN corresponds to MADV_SEQUENTIAL,
+  //  FILE_FLAG_RANDOM_ACCESS corresponds to MADV_RANDOM.
+  // Additionally, we can set flProtect for CreateFileMapping(), where
+  //  SEC_LARGE_PAGES corresponds to MADV_HUGEPAGE.
+  int success = 0;
+  warning("unable to madvise file: advice cannot be changed on Win32");
 #endif
-  return ScalarInteger(ret);
+  return ScalarLogical(success);
 }/*}}}*/
 
 /* {{{ mmap_mprotect */
 SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP prot) {
-  int i, LEN;
-  size_t ival, upper_bound;
-#ifndef WIN32
-  char *data, *addr;
-
-  data = MMAP_DATA(mmap_obj);
-  int pagesize = asInteger(mmap_pagesize());
-#endif
-  LEN = length(index);
-
-  SEXP ret; PROTECT(ret = allocVector(INTSXP, LEN));
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
+  char *data;
   
-  upper_bound = (MMAP_SIZE(mmap_obj)-sizeof(int));
-  for(i=0;i<LEN;i++) {
-    ival = (INTEGER(index)[i]-1)*sizeof(int);
-    if( ival > upper_bound || ival < 0 )
-      error("'i=%i' out of bounds", i);
-    
-/* Rprintf("offset: %i\n",(ival/pagesize)*pagesize); */
 #ifndef WIN32
-    addr = &(data[(int)((ival/pagesize)*pagesize)]);
-    INTEGER(ret)[i] = mprotect(addr, ((ival/pagesize)*pagesize)*2, INTEGER(prot)[0]);
+  R_xlen_t aligned;
+  int pagesize = asInteger(mmap_pagesize());
 #else
-    INTEGER(ret)[i] = -1;
+  DWORD old_prot;
 #endif
+  
+  data = MMAP_DATA(mmap_obj);
+  LEN = xlength(index);
+
+  SEXP success;
+  PROTECT(success = allocVector(LGLSXP, LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  for(i = 0; i < LEN; i++) {
+    u = (R_xlen_t)index_p[i] - 1;
+    if(u >= mmap_len || u < 0)
+      error("'i=%i' out of bounds", u + 1);
+    
+#ifndef WIN32
+    // If pagesize is a power of 2, the bit twiddling hack rounds down
+    //  `u * Cbytes` to the nearest multiple of pagesize, i.e. equivalently:
+    //    aligned = (R_xlen_t)floor(u * Cbytes / pagesize) * pagesize
+    //  but without any division operations.
+    assert(pagesize != 0 && (pagesize & (pagesize - 1)) == 0);
+    aligned = (u * Cbytes) & ~((R_xlen_t)pagesize - 1);
+    LOGICAL(success)[i] = !mprotect(&data[aligned], (size_t)((u + 1) * Cbytes - aligned), asInteger(prot));
+#else
+    LOGICAL(success)[i] = !!VirtualProtect(&data[u * Cbytes], (SIZE_T)Cbytes, asInteger(prot), &old_prot);
+#endif
+    if(!LOGICAL(success)[i])
+      rpwarning("unable to mprotect file: %s");
   }
-  UNPROTECT(1);
-  return ret;
+  
+  UNPROTECT(2);
+  return success;
 }/*}}}*/
 
 void logical_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {

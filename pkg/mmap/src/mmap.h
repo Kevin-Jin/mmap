@@ -12,6 +12,7 @@
 */
 
 #define MMAP_DATA(mmap_object)        R_ExternalPtrAddr(findVar(install("data"),mmap_object))
+#define MMAP_PAGEOFF(mmap_object)     (asInteger(findVar(install("pageoff"),mmap_object)))
 #define MMAP_SIZE(mmap_object)        ((R_xlen_t)asReal(findVar(install("bytes"),mmap_object)))
 #define MMAP_FD(mmap_object)          ((intptr_t)asInteger(findVar(install("filedesc"),mmap_object)))
 #define MMAP_SMODE(mmap_object)       findVar(install("storage.mode"),mmap_object)
