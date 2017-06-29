@@ -163,8 +163,10 @@ SEXP mmap_mkFlags (SEXP _flags) {
       flags_bit = flags_bit | MAP_SHARED; continue;
     } else if(strcmp(cur_string,"MAP_PRIVATE") == 0) {
       flags_bit = flags_bit | MAP_PRIVATE; continue;
+#ifndef WIN32
     } else if(strcmp(cur_string,"MAP_FIXED") == 0) {
       flags_bit = flags_bit | MAP_FIXED; continue;
+#endif
 
     // madvise() advice enum
     } else if(strcmp(cur_string,"MADV_NORMAL") == 0) {
@@ -174,8 +176,6 @@ SEXP mmap_mkFlags (SEXP _flags) {
       flags_bit = flags_bit | MADV_RANDOM; continue;
     } else if(strcmp(cur_string,"MADV_SEQUENTIAL") == 0) {
       flags_bit = flags_bit | MADV_SEQUENTIAL; continue;
-#endif
-#ifdef HAVE_MADVISE
     } else if(strcmp(cur_string,"MADV_WILLNEED") == 0) {
       flags_bit = flags_bit | MADV_WILLNEED; continue;
     } else if(strcmp(cur_string,"MADV_DONTNEED") == 0) {
@@ -216,7 +216,7 @@ SEXP mmap_munmap (SEXP mmap_obj) {
 
   if(data == NULL) {
     success = 0;
-    warning("unable to munmap file: invalid mmap pointer");
+    warning("unable to munmap file: Invalid mmap pointer.");
   } else {
     success = !!UnmapViewOfFile((unsigned char *)(data - pageoff));
     if(!success)
@@ -245,7 +245,7 @@ SEXP mmap_munmap (SEXP mmap_obj) {
 
   if(data == NULL) {
     success = 0;
-    warning("unable to munmap file: invalid mmap pointer");
+    warning("unable to munmap file: Invalid mmap pointer.");
   } else {
     success = !munmap((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff));
     if(!success)
@@ -338,7 +338,7 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
     rperror("unable to open file: %s");
   if((intptr_t)hFile > INT_MAX || (intptr_t)hFile < INT_MIN) {
     CloseHandle(hFile);
-    error("unable to open file: file descriptor overflow");
+    error("unable to open file: File descriptor overflow.");
   }
 
   DWORD prot = PAGE_EXECUTE_READWRITE;
@@ -350,7 +350,7 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   if((intptr_t)hMap > INT_MAX || (intptr_t)hMap < INT_MIN) {
     CloseHandle(hMap);
     CloseHandle(hFile);
-    error("unable to mmap file: map handle overflow");
+    error("unable to mmap file: Map handle overflow.");
   }
   ULARGE_INTEGER off = {.QuadPart  = (uint64_t)asReal(_off)};
   data = (unsigned char *)MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE, off.HighPart, off.LowPart, (SIZE_T)asReal(_len) + asInteger(_pageoff));
@@ -385,7 +385,7 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   return(mmap_obj);
 }
 #else
-SEXP mmap_madvise (SEXP, SEXP);
+SEXP mmap_madvise (SEXP, SEXP, SEXP);
 
 SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
                 SEXP _flags, SEXP _advice, SEXP _len, SEXP _off, SEXP _pageoff) {
@@ -424,7 +424,7 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   defineVar(install("storage.mode"), _type,mmap_obj);
   defineVar(install("dim"), R_NilValue ,mmap_obj);
   
-  mmap_madvise(mmap_obj, _advice);
+  mmap_madvise(mmap_obj, R_NilValue, _advice);
   UNPROTECT(1);
   return(mmap_obj);
 } /*}}}*/
@@ -469,7 +469,7 @@ SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
   
   success = ((flags & MS_SYNC) || (flags & MS_ASYNC)) && (!(flags & MS_SYNC) || !(flags & MS_ASYNC));
   if(!success)
-    warning("unable to msync file: exactly one of MS_SYNC or MS_ASYNC must be set");
+    warning("unable to msync file: Exactly one of MS_SYNC or MS_ASYNC must be set.");
   
   if(success) {
     success = !!FlushViewOfFile((void *)data, (size_t)MMAP_SIZE(mmap_obj));
@@ -505,24 +505,193 @@ SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
 }/*}}}*/
 #endif
 
+ptrdiff_t inline align_down(ptrdiff_t idx, ptrdiff_t pageoff, ptrdiff_t pagesize) {
+  // If pagesize is a power of 2, the bit twiddling hack rounds down
+  //  `idx + pageoff` to the nearest multiple of pagesize without any
+  //  division operations, i.e. equivalently:
+  //    return (R_xlen_t)floor((idx + pageoff) / pagesize) * pagesize - pageoff;
+  // Note that result can be negative if `pageoff != 0` and `idx` is small.
+  // This is not a buffer overflow; we are still referencing a valid address
+  //  since we assigned `data = &mmap(...)[pageoff]` in `mmap_mmap()` and the
+  //  the left hand side of the subtraction is always non-negative since
+  //  `idx` and `pageoff` are both non-negative and `pagesize` is positive.
+  assert(idx >= 0 && pageoff >= 0);
+  assert(pagesize > 0 && (pagesize & (pagesize - 1)) == 0);
+  return ((idx + pageoff) & ~(pagesize - 1)) - pageoff;
+}
+
+ptrdiff_t inline align_up(ptrdiff_t idx, ptrdiff_t pageoff, ptrdiff_t pagesize) {
+  return align_down(idx + (pagesize - 1), pageoff, pagesize);
+}
+
 /* {{{ mmap_madvise */
+#ifdef WIN32
 SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
-  /* function needs to allow for data to be an offset, else
-     we can't control anything of value... */
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
+  unsigned char *data;
+  
+  typedef struct { PVOID addr; SIZE_T size; } mem_range;
+  typedef BOOL (WINAPI *madv_willneed_fn)(HANDLE, ULONG_PTR, mem_range*, ULONG);
+  typedef DWORD (WINAPI *madv_dontneed_fn)(PVOID, SIZE_T);
+  
+  HMODULE kern32 = NULL;
+  madv_willneed_fn madv_willneed = NULL;
+  madv_dontneed_fn madv_dontneed = NULL;
+  
+  R_xlen_t aligned;
+  R_xlen_t pagesize = asInteger(mmap_pagesize());
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
+  
+  data = MMAP_DATA(mmap_obj);
+  LEN = xlength(index);
+  
+  SEXP success;
+  
+  PROTECT(success = allocVector(LGLSXP, LEN == 0 ? 1 : LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+  
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+
+  // Cannot use load-time dynamic linking because mingw may link against an old
+  //  kernel32.lib and memoryapi.h file so compilation fails.
+  // Conveniently, kernel32.dll appears to always be loaded at runtime, so we
+  //  don't have to deal with the hassle of LoadLibrary() and FreeLibrary() and
+  //  can just simply use GetModuleHandle() for run-time dynamic linking.
+  kern32 = GetModuleHandle("kernel32.dll");
+  if(kern32 == NULL)
+    rpwarning("unable to madvise file: %s");
+  
+  if(kern32 != NULL && asInteger(_advice) == MADV_WILLNEED) {
+    madv_willneed = (madv_willneed_fn)GetProcAddress(kern32, "PrefetchVirtualMemory");
+    if(madv_willneed == NULL)
+      rpwarning("unable to madvise file: %s");
+  } else if(kern32 != NULL && asInteger(_advice) == MADV_DONTNEED) {
+    madv_dontneed = (madv_dontneed_fn)GetProcAddress(kern32, "DiscardVirtualMemory");
+    if(madv_dontneed == NULL)
+      rpwarning("unable to madvise file: %s");
+    
+    // PLEASE DO NOT ERASE THIS PART OR ELSE YOU'LL CORRUPT THE BACKING FILE.
+    //  DiscardVirtualMemory does not behave the same as MADV_DONTNEED on a
+    //  file-backed mmap and instead will just zero-fill the specified pages
+    //  (and sync to disk) before throwing ERROR_USER_MAPPED_FILE!
+    // This destructive behavior is very similar to MADV_DONTNEED on anonymous
+    //  mappings but it does not allow for a "reloading of the memory contents"
+    //  after memory decommission for file-backed mappings.
+    // VirtualUnlock() might be a better lead.
+    if(madv_dontneed != NULL) {
+      madv_dontneed = NULL;
+      warning("unable to madvise file: This advice cannot be changed once set.");
+    }
+  } else if (kern32 != NULL) {
+    warning("unable to madvise file: This advice cannot be changed once set.");
+  }
+  
+  if(madv_willneed != NULL) {
+    if(LEN == 0) {
+      LOGICAL(success)[0] = !!madv_willneed(GetCurrentProcess(), 1, &(mem_range){data, MMAP_SIZE(mmap_obj)}, 0);
+      if(!LOGICAL(success)[0])
+        rpwarning("unable to madvise file: %s");
+    }
+    
+    for(i = 0; i < LEN; i++) {
+      u = (R_xlen_t)index_p[i] - 1;
+      if(u >= mmap_len || u < 0)
+        error("'i=%i' out of bounds", u + 1);
+      
+      LOGICAL(success)[i] = !!madv_willneed(GetCurrentProcess(), 1, &(mem_range){&data[u * Cbytes], Cbytes}, 0);
+      if(!LOGICAL(success)[i])
+        rpwarning("unable to madvise file: %s");
+    }
+  } else if(madv_dontneed != NULL) {
+    if(LEN == 0) {
+      LOGICAL(success)[0] = madv_dontneed((unsigned char *)(data - pageoff), (SIZE_T)align_up(MMAP_SIZE(mmap_obj) + pageoff, 0, pagesize)) == ERROR_SUCCESS;
+      if(!LOGICAL(success)[0])
+        rpwarning("unable to madvise file: %s");
+    }
+    
+    for(i = 0; i < LEN; i++) {
+      u = (R_xlen_t)index_p[i] - 1;
+      if(u >= mmap_len || u < 0)
+        error("'i=%i' out of bounds", u + 1);
+      
+      // "Page-aligned starting address of the memory to discard."
+      aligned = align_down(u * Cbytes, pageoff, pagesize);
+      LOGICAL(success)[i] = madv_dontneed(&data[aligned], (SIZE_T)align_up((u + 1) * Cbytes - aligned, 0, pagesize)) == ERROR_SUCCESS;
+      if(!LOGICAL(success)[i])
+        rpwarning("unable to madvise file: %s");
+    }
+  } else {
+    if(LEN == 0)
+      LOGICAL(success)[0] = 0;
+    
+    for(i = 0; i < LEN; i++) {
+      u = (R_xlen_t)index_p[i] - 1;
+      if(u >= mmap_len || u < 0)
+        error("'i=%i' out of bounds", u + 1);
+      
+      LOGICAL(success)[i] = 0;
+    }
+  }
+  
+  UNPROTECT(2);
+  return success;
+}
+#else
+SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
 #ifdef HAVE_MADVISE
   unsigned char *data;
+  R_xlen_t aligned;
+  R_xlen_t pagesize = asInteger(mmap_pagesize());
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
   data = MMAP_DATA(mmap_obj);
-  int success = !madvise(data, MMAP_SIZE(mmap_obj), asInteger(_advice));
-  if(!success)
+#endif
+  LEN = xlength(index);
+
+  SEXP success;
+  
+  if(LEN == 0) {
+#ifdef HAVE_MADVISE
+    if(!madvise((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff), asInteger(_advice)))
+      return ScalarLogical(1);
     rpwarning("unable to madvise file: %s");
 #else
-  // TODO: MADV_WILLNEED -> PrefetchVirtualMemory()
-  // TODO: MADV_DONTNEED -> DiscardVirtualMemory()
-  int success = 0;
-  warning("unable to madvise file: advice cannot be changed on Win32");
+    warning("unable to madvise file: This advice cannot be changed once set.");
 #endif
-  return ScalarLogical(success);
-}/*}}}*/
+    return ScalarLogical(0);
+  }
+  
+  PROTECT(success = allocVector(LGLSXP, LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+  
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  for(i = 0; i < LEN; i++) {
+    u = (R_xlen_t)index_p[i] - 1;
+    if(u >= mmap_len || u < 0)
+      error("'i=%i' out of bounds", u + 1);
+    
+#ifdef HAVE_MADVISE
+    // "The Linux implementation requires that the address addr be page-aligned"
+    aligned = align_down(u * Cbytes, pageoff, pagesize);
+    LOGICAL(success)[i] = !madvise(&data[aligned], (size_t)((u + 1) * Cbytes - aligned), asInteger(_advice));
+    if(!LOGICAL(success)[i])
+      rpwarning("unable to madvise file: %s");
+#else
+    LOGICAL(success)[i] = 0;
+    warning("unable to madvise file: This advice cannot be changed once set.");
+#endif
+  }
+  
+  UNPROTECT(2);
+  return success;
+}
+#endif
 
 /* {{{ mmap_mprotect */
 SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP _prot) {
@@ -569,17 +738,8 @@ SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP _prot) {
       error("'i=%i' out of bounds", u + 1);
     
 #ifndef WIN32
-    // If pagesize is a power of 2, the bit twiddling hack rounds down
-    //  `u * Cbytes + pageoff` to the nearest multiple of pagesize without any
-    //  division operations, i.e. equivalently:
-    //    aligned=(R_xlen_t)floor((u*Cbytes+pageoff)/pagesize)*pagesize-pageoff
-    // Note that aligned can be negative if pageoff is not zero and u is small.
-    // This is not a buffer overflow; we are still referencing a valid address
-    //  since we assigned `data = &mmap(...)[pageoff]` in `mmap_mmap()` and the
-    //  the left hand side of the subtraction is always non-negative since
-    //  u, Cbytes, and pageoff are all non-negative and pagesize is positive.
-    assert(pagesize != 0 && (pagesize & (pagesize - 1)) == 0);
-    aligned = ((u * Cbytes + pageoff) & ~(pagesize - 1)) - pageoff;
+    // "addr must be aligned to a page boundary."
+    aligned = align_down(u * Cbytes, pageoff, pagesize);
     LOGICAL(success)[i] = !mprotect(&data[aligned], (size_t)((u + 1) * Cbytes - aligned), prot);
 #else
     LOGICAL(success)[i] = !!VirtualProtect(&data[u * Cbytes], (SIZE_T)Cbytes, prot, &old_prot);
