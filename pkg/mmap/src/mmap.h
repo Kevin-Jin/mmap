@@ -41,8 +41,8 @@
 */
 
 #ifdef WIN32
-/*#define MMAP_HANDLE(mmap_object)      INTEGER(VECTOR_ELT(mmap_object,5))[0]*/
 #define MMAP_HANDLE(mmap_object)      ((intptr_t)asInteger((findVar(install("handle"),mmap_object))))
+#define MMAP_FLAGS(mmap_object)       (asInteger((findVar(install("flags"),mmap_object))))
 /* Definitions from the Linux kernel source 2.6.35.7 */
 #define PROT_READ       0x1             /* page can be read */
 #define PROT_WRITE      0x2             /* page can be written */

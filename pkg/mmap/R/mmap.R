@@ -105,7 +105,7 @@ mmapFlags <- function(...) {
 mmap <- function(file, mode=int32(), 
                  extractFUN=NULL, replaceFUN=NULL,
                  prot=mmapFlags("PROT_READ","PROT_WRITE"),
-                 flags=mmapFlags("MAP_SHARED"),len,off=0L,
+                 flags=mmapFlags("MAP_SHARED"),advice=mmapFlags("MADV_NORMAL"),len,off=0L,
                  ...) {
     if(missing(file))
       stop("'file' must be specified")
@@ -124,6 +124,7 @@ mmap <- function(file, mode=int32(),
                       file,
                       as.integer(prot), 
                       as.integer(flags), 
+                      as.integer(advice), 
                       as.double(len),
                       as.double(off),
                       as.integer(pageoff),
@@ -154,7 +155,13 @@ msync <- function(x, flags=mmapFlags("MS_ASYNC")) {
   .Call("mmap_msync", x, as.integer(flags), PKG="mmap")
 }
 
-mprotect <- function(x, i, prot) {
+madvise <- function(x, i = NULL, advice) {
+  if(!is.mmap(x))
+    stop("mmap object required to munmap")
+  .Call("mmap_madvise", x, i, as.integer(advice), PKG="mmap")
+}
+
+mprotect <- function(x, i = NULL, prot) {
   if(!is.mmap(x))
     stop("mmap object required to munmap")
   # # Assuming i is the sequence of targeted record numbers (1-indexed):
@@ -170,7 +177,7 @@ mprotect <- function(x, i, prot) {
   # w <- floor(v / sizeof(x$storage.mode)) + 1 # round to -Inf, not round to 0!
   # # Sequence of affected record numbers can be found by
   # z <- unique(do.call(c, as.list(apply(w, 1, function(range) range[1]:range[2]))))
-  .Call("mmap_mprotect", x, i, prot, PKG="mmap")
+  .Call("mmap_mprotect", x, i, as.integer(prot), PKG="mmap")
 }
 
 is.mmap <- function(x) {

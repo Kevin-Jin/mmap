@@ -5,6 +5,7 @@ export(
        mmap,
        munmap,
        msync,
+       madvise,
        mprotect,
        
        mmapFlags,
