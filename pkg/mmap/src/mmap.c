@@ -96,6 +96,7 @@ This package implements all mmap-related calls:
   mmap
   munmap
   msync
+  madvise
   mprotect
 
 The conversion mechnisms to deal with translating
@@ -166,6 +167,8 @@ SEXP mmap_mkFlags (SEXP _flags) {
 #ifndef WIN32
     } else if(strcmp(cur_string,"MAP_FIXED") == 0) {
       flags_bit = flags_bit | MAP_FIXED; continue;
+    } else if(strcmp(cur_string,"MAP_NORESERVE") == 0) {
+      flags_bit = flags_bit | MAP_NORESERVE; continue;
 #endif
 
     // madvise() advice enum
@@ -222,7 +225,19 @@ SEXP mmap_munmap (SEXP mmap_obj) {
     if(!success)
       rpwarning("unable to munmap file: %s");
   }
-
+  
+  // We don't actually need to keep the HANDLE returned by `CreateFileMapping()`
+  //  around but instead can just `CloseHandle()` it after `MapViewOfFile()`:
+  //  "to fully close a file mapping object, an application must unmap all
+  //  mapped views of the file mapping object by calling UnmapViewOfFile and
+  //  close the file mapping object handle by calling CloseHandle. These
+  //  functions can be called in any order."
+  // The fildes, on the other hand, is needed in `mmap_msync()`, although it too
+  //  is safe to close after `CreateFileMapping()`: "although an application may
+  //  close the file handle used to create a file mapping object, the system
+  //  holds the corresponding file open until the last view of the file is
+  //  unmapped. Files for which the last view has not yet been unmapped are held
+  //  open with no sharing restrictions."
   CloseHandle(mh);
   CloseHandle(fd);
   R_ClearExternalPtr(findVar(install("data"),mmap_obj));
@@ -252,6 +267,11 @@ SEXP mmap_munmap (SEXP mmap_obj) {
       rpwarning("unable to munmap file: %s");
   }
 
+  // We don't actually need to keep the fildes around but instead can just
+  //  `close()` it after `mmap()` in `mmap_mmap()`: "the mmap() function adds an
+  //  extra reference to the file associated with the file descriptor fildes
+  //  which is not removed by a subsequent close() on that file descriptor. This
+  //  reference is removed when there are no more mappings to the file."
   close(fd);
   R_ClearExternalPtr(findVar(install("data"),mmap_obj));
   return(ScalarLogical(success)); 
@@ -497,8 +517,10 @@ SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
 #else
 SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
   unsigned char *data;
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
   data = MMAP_DATA(mmap_obj);
-  int success = !msync(data, MMAP_SIZE(mmap_obj), INTEGER(_flags)[0]);
+  // "The implementation  will require that addr be a multiple of the page size"
+  int success = !msync((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff), asInteger(_flags));
   if(!success)
     rpwarning("unable to msync file: %s");
   return ScalarLogical(success);
@@ -533,16 +555,10 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
   
   typedef struct { PVOID addr; SIZE_T size; } mem_range;
   typedef BOOL (WINAPI *madv_willneed_fn)(HANDLE, ULONG_PTR, mem_range*, ULONG);
-  typedef DWORD (WINAPI *madv_dontneed_fn)(PVOID, SIZE_T);
   
   HMODULE kern32 = NULL;
   madv_willneed_fn madv_willneed = NULL;
-  madv_dontneed_fn madv_dontneed = NULL;
-  
-  R_xlen_t aligned;
-  R_xlen_t pagesize = asInteger(mmap_pagesize());
-  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
-  
+
   data = MMAP_DATA(mmap_obj);
   LEN = xlength(index);
   
@@ -555,37 +571,22 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
   Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
   mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
 
-  // Cannot use load-time dynamic linking because mingw may link against an old
-  //  kernel32.lib and memoryapi.h file so compilation fails.
-  // Conveniently, kernel32.dll appears to always be loaded at runtime, so we
-  //  don't have to deal with the hassle of LoadLibrary() and FreeLibrary() and
-  //  can just simply use GetModuleHandle() for run-time dynamic linking.
-  kern32 = GetModuleHandle("kernel32.dll");
-  if(kern32 == NULL)
-    rpwarning("unable to madvise file: %s");
-  
-  if(kern32 != NULL && asInteger(_advice) == MADV_WILLNEED) {
-    madv_willneed = (madv_willneed_fn)GetProcAddress(kern32, "PrefetchVirtualMemory");
-    if(madv_willneed == NULL)
-      rpwarning("unable to madvise file: %s");
-  } else if(kern32 != NULL && asInteger(_advice) == MADV_DONTNEED) {
-    madv_dontneed = (madv_dontneed_fn)GetProcAddress(kern32, "DiscardVirtualMemory");
-    if(madv_dontneed == NULL)
+  if(asInteger(_advice) == MADV_WILLNEED) {
+    // Cannot use load-time dynamic linking because mingw may link against an
+    //  old kernel32.lib and memoryapi.h file so compilation fails.
+    // Conveniently, kernel32.dll appears to always be loaded at runtime, so we
+    //  don't have to deal with the hassle of LoadLibrary() and FreeLibrary()
+    //  and can just simply use GetModuleHandle() for run-time dynamic linking.
+    kern32 = GetModuleHandle("kernel32.dll");
+    if(kern32 == NULL)
       rpwarning("unable to madvise file: %s");
     
-    // PLEASE DO NOT ERASE THIS PART OR ELSE YOU'LL CORRUPT THE BACKING FILE.
-    //  DiscardVirtualMemory does not behave the same as MADV_DONTNEED on a
-    //  file-backed mmap and instead will just zero-fill the specified pages
-    //  (and sync to disk) before throwing ERROR_USER_MAPPED_FILE!
-    // This destructive behavior is very similar to MADV_DONTNEED on anonymous
-    //  mappings but it does not allow for a "reloading of the memory contents"
-    //  after memory decommission for file-backed mappings.
-    // VirtualUnlock() might be a better lead.
-    if(madv_dontneed != NULL) {
-      madv_dontneed = NULL;
-      warning("unable to madvise file: This advice cannot be changed once set.");
+    if(kern32 != NULL) {
+      madv_willneed = (madv_willneed_fn)GetProcAddress(kern32, "PrefetchVirtualMemory");
+      if(madv_willneed == NULL)
+        rpwarning("unable to madvise file: %s");
     }
-  } else if (kern32 != NULL) {
+  } else if(asInteger(_advice) != MADV_DONTNEED) {
     warning("unable to madvise file: This advice cannot be changed once set.");
   }
   
@@ -605,9 +606,18 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
       if(!LOGICAL(success)[i])
         rpwarning("unable to madvise file: %s");
     }
-  } else if(madv_dontneed != NULL) {
+  } else if(asInteger(_advice) == MADV_DONTNEED) {
+    // "Calling VirtualUnlock on a range of memory that is not locked releases
+    //  the pages from the process's working set."
+    // "If any of the pages in the specified range are not locked, VirtualUnlock
+    //  removes such pages from the working set, sets last error to
+    //  ERROR_NOT_LOCKED, and returns FALSE."
+    // According to Task Manager, this indeed reduces the "working set size"
+    //  immediately just like how "the resident set size (RSS) of the calling
+    //  process will be immediately reduced" on Linux with "MADV_DONTNEED". In
+    //  other words, physical memory is freed up for other processes to use.
     if(LEN == 0) {
-      LOGICAL(success)[0] = madv_dontneed((unsigned char *)(data - pageoff), (SIZE_T)align_up(MMAP_SIZE(mmap_obj) + pageoff, 0, pagesize)) == ERROR_SUCCESS;
+      LOGICAL(success)[0] = !!VirtualUnlock(data, MMAP_SIZE(mmap_obj)) || GetLastError() == ERROR_NOT_LOCKED;
       if(!LOGICAL(success)[0])
         rpwarning("unable to madvise file: %s");
     }
@@ -617,9 +627,7 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
-      // "Page-aligned starting address of the memory to discard."
-      aligned = align_down(u * Cbytes, pageoff, pagesize);
-      LOGICAL(success)[i] = madv_dontneed(&data[aligned], (SIZE_T)align_up((u + 1) * Cbytes - aligned, 0, pagesize)) == ERROR_SUCCESS;
+      LOGICAL(success)[i] = !!VirtualUnlock(&data[u * Cbytes], Cbytes) || GetLastError() == ERROR_NOT_LOCKED;
       if(!LOGICAL(success)[i])
         rpwarning("unable to madvise file: %s");
     }
@@ -656,6 +664,13 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
   
   if(LEN == 0) {
 #ifdef HAVE_MADVISE
+    // Note: MADV_DONTNEED is kind of dangerous since it's destructive on some
+    //  POSIX implementations. On Linux: "If the pages are dirty, it's OK to
+    //  just throw them away. [...] An interface that causes the system to free
+    //  clean pages and flush dirty pages is already available as
+    //  msync(MS_INVALIDATE)."
+    // This warning should definitely show up in the R documentation and should
+    //  advise the user to call `msync(MS_SYNC)` before using `MADV_DONTNEED`.
     if(!madvise((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff), asInteger(_advice)))
       return ScalarLogical(1);
     rpwarning("unable to madvise file: %s");
