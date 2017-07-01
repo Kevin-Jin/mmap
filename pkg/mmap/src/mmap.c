@@ -1,16 +1,22 @@
-#include <R.h>
+#include "mmap.h"
+
 #include <string.h>
 #include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
-#include "mmap.h"
+#include <assert.h>
 
 #ifndef WIN32
 #ifdef HAVE_MMAP
 #  include <sys/mman.h>
+#endif
+#ifndef HAVE_STRNLEN
+size_t strnlen(const char *str, size_t max) {
+  const char *end = memchr (str, 0, max);
+  return end ? (size_t)(end - str) : max;
+}
 #endif
 #else
 #include <ctype.h>
@@ -49,8 +55,16 @@ static inline uint16_t __builtin_bswap16(uint16_t x){return(x<<8)|(x>>8);}
 // Since by definition, byte is synonymous with char and `sizeof(char) == 1`,
 //  a byte would not be 8-bits so `SMODE_CBYTES` and `memcpy` calls will break.
 #if CHAR_BIT != 8
-#error "`char` is not 8-bits"
+#error "`char` is not 8 bits"
 #endif
+// If `cond` is a compile time constant that evaluates to FALSE, then GCC throws
+//  a division by zero error.
+#define STATIC_ASSERT(cond, message) enum { message = 1 / (cond) }
+// We also want to make sure `_FILE_OFFSET_BITS` is working and that `float` and
+//  `double` are the expected sizes.
+STATIC_ASSERT(sizeof(float) == 4, SIZEOF_FLOAT_IS_4);
+STATIC_ASSERT(sizeof(double) == 8, SIZEOF_DOUBLE_IS_4);
+STATIC_ASSERT(sizeof(off_t) == 8, SIZEOF_OFF_T_IS_8);
 
 // For the sake of allowing uninterrupted counting from 0 to overflow, NA values
 //  for unsigned types should be equivalent to UINTn_MAX.
@@ -194,20 +208,34 @@ SEXP mmap_mkFlags (SEXP _flags) {
 
 /* mmap_munmap {{{ */
 #ifdef WIN32
+#define BUFSIZE 8192
+
 void rperror(const char *format) {
-  LPTSTR errorText = NULL;
-  if(FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL) && errorText != NULL) {
-    error(format, errorText);
-    LocalFree(errorText);
-  }
+  // `Rf_error()` calls `longjmp()` to a location set further up the call stack
+  //  and never returns here to where it was invoked. Since `errorText` must be
+  //  valid when passed to `Rf_error()`, yet we cannot explicitly free it from
+  //  the heap after the call to `Rf_error()`, we must use either a stack
+  //  variable or a static variable.
+  static __thread TCHAR errorText[BUFSIZE];
+  
+  HRESULT errnum = HRESULT_FROM_WIN32(GetLastError());
+  if(!FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, errnum, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, BUFSIZE, NULL))
+    snprintf(errorText, BUFSIZE, "0x%lx", errnum);
+  
+  error(format, errorText);
 }
 
 void rpwarning(const char *format) {
   LPTSTR errorText = NULL;
-  if(FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, GetLastError(), MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL) && errorText != NULL) {
-    warning(format, errorText);
-    LocalFree(errorText);
+  
+  HRESULT errnum = HRESULT_FROM_WIN32(GetLastError());
+  if(!FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, errnum, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL) || errorText == NULL) {
+    errorText = LocalAlloc(LMEM_FIXED, snprintf(NULL, 0, "0x%lx", errnum) + 1);
+    sprintf(errorText, "0x%lx", errnum);
   }
+  
+  warning(format, errorText);
+  LocalFree(errorText);
 }
 
 SEXP mmap_munmap (SEXP mmap_obj) {
@@ -343,6 +371,10 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
   
+  assert(asReal(_pageoff) <= INT_MAX_VALUE);
+  if(asReal(_len) + asInteger(_pageoff) > (SIZE_T)-1)
+    error("unable to mmap file: Requested length is too high.");
+  
   // Give the system's most permissive access to `CreateFile()` first so that we
   //  can give the most permissive protections to `CreateFileMapping()` and the
   //  most permissive access to `MapViewOfFile()`.
@@ -373,13 +405,13 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
     error("unable to mmap file: Map handle overflow.");
   }
   ULARGE_INTEGER off = {.QuadPart  = (uint64_t)asReal(_off)};
-  data = (unsigned char *)MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE, off.HighPart, off.LowPart, (SIZE_T)asReal(_len) + asInteger(_pageoff));
+  data = (unsigned char *)MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE, off.HighPart, off.LowPart, (SIZE_T)(asReal(_len) + asInteger(_pageoff)));
   if(data == NULL) {
     CloseHandle(hMap);
     CloseHandle(hFile);
     rperror("unable to mmap file: %s");
   }
-  if(!VirtualProtect(data, (SIZE_T)asReal(_len) + asInteger(_pageoff), translate_prot_and_flags(asInteger(_prot), asInteger(_flags)), &prot)) {
+  if(!VirtualProtect(data, (SIZE_T)(asReal(_len) + asInteger(_pageoff)), translate_prot_and_flags(asInteger(_prot), asInteger(_flags)), &prot)) {
     CloseHandle(hMap);
     CloseHandle(hFile);
     rperror("unable to mmap file: %s");
@@ -412,14 +444,18 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   int fd;
   unsigned char *data;
   struct stat st;
-
+  
+  assert(asReal(_pageoff) <= INT_MAX_VALUE);
+  if(asReal(_len) + asInteger(_pageoff) > SIZE_MAX)
+    error("unable to mmap file: Requested length is too high.");
+  
   stat(CHAR(asChar(_fildesc)), &st);
   fd = open(CHAR(asChar(_fildesc)), O_RDWR);
   if(fd < 0)
     rperror("unable to open file: %s");
   
   data = mmap((caddr_t)0, 
-              (size_t)asReal(_len) + asInteger(_pageoff), 
+              (size_t)(asReal(_len) + asInteger(_pageoff)), 
               asInteger(_prot), 
               asInteger(_flags), 
               fd, 
@@ -492,7 +528,7 @@ SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
     warning("unable to msync file: Exactly one of MS_SYNC or MS_ASYNC must be set.");
   
   if(success) {
-    success = !!FlushViewOfFile((void *)data, (size_t)MMAP_SIZE(mmap_obj));
+    success = !!FlushViewOfFile((void *)data, (SIZE_T)MMAP_SIZE(mmap_obj));
     if(success && (flags & MS_SYNC))
       success = !!FlushFileBuffers((HANDLE)MMAP_FD(mmap_obj));
     if(!success)
@@ -592,7 +628,7 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
   
   if(madv_willneed != NULL) {
     if(LEN == 0) {
-      LOGICAL(success)[0] = !!madv_willneed(GetCurrentProcess(), 1, &(mem_range){data, MMAP_SIZE(mmap_obj)}, 0);
+      LOGICAL(success)[0] = !!madv_willneed(GetCurrentProcess(), 1, &(mem_range){data, (SIZE_T)MMAP_SIZE(mmap_obj)}, 0);
       if(!LOGICAL(success)[0])
         rpwarning("unable to madvise file: %s");
     }
@@ -602,7 +638,7 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
-      LOGICAL(success)[i] = !!madv_willneed(GetCurrentProcess(), 1, &(mem_range){&data[u * Cbytes], Cbytes}, 0);
+      LOGICAL(success)[i] = !!madv_willneed(GetCurrentProcess(), 1, &(mem_range){&data[u * Cbytes], (SIZE_T)Cbytes}, 0);
       if(!LOGICAL(success)[i])
         rpwarning("unable to madvise file: %s");
     }
@@ -617,7 +653,7 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
     //  process will be immediately reduced" on Linux with "MADV_DONTNEED". In
     //  other words, physical memory is freed up for other processes to use.
     if(LEN == 0) {
-      LOGICAL(success)[0] = !!VirtualUnlock(data, MMAP_SIZE(mmap_obj)) || GetLastError() == ERROR_NOT_LOCKED;
+      LOGICAL(success)[0] = !!VirtualUnlock(data, (SIZE_T)MMAP_SIZE(mmap_obj)) || GetLastError() == ERROR_NOT_LOCKED;
       if(!LOGICAL(success)[0])
         rpwarning("unable to madvise file: %s");
     }
@@ -627,7 +663,7 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
-      LOGICAL(success)[i] = !!VirtualUnlock(&data[u * Cbytes], Cbytes) || GetLastError() == ERROR_NOT_LOCKED;
+      LOGICAL(success)[i] = !!VirtualUnlock(&data[u * Cbytes], (SIZE_T)Cbytes) || GetLastError() == ERROR_NOT_LOCKED;
       if(!LOGICAL(success)[i])
         rpwarning("unable to madvise file: %s");
     }

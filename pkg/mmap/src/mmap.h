@@ -1,10 +1,12 @@
-#include <R.h>
-#include <Rinternals.h>
-#include "config.h"
-
-#include <assert.h>
+#define _FILE_OFFSET_BITS 64
 #define __STDC_LIMIT_MACROS
 #define __STDC_CONSTANT_MACROS
+
+#include "config.h"
+
+#include <R.h>
+#include <Rinternals.h>
+
 #include <stdint.h>
 
 /*
