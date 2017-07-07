@@ -22,6 +22,7 @@ size_t strnlen(const char *str, size_t max) {
 #include <ctype.h>
 #include <stdio.h>
 #include <windows.h>
+#include <aclapi.h>
 #undef HAVE_MADVISE
 #endif
 
@@ -65,6 +66,10 @@ static inline uint16_t __builtin_bswap16(uint16_t x){return(x<<8)|(x>>8);}
 STATIC_ASSERT(sizeof(float) == 4, SIZEOF_FLOAT_IS_4);
 STATIC_ASSERT(sizeof(double) == 8, SIZEOF_DOUBLE_IS_4);
 STATIC_ASSERT(sizeof(off_t) == 8, SIZEOF_OFF_T_IS_8);
+// On Win32 and most POSIX implementations, the "OTH" family of permissions are
+//  less significant than the "GRP" and "USR" families. Therefore, we want to
+//  ensure that S_IXOTH is positive and a power of two.
+STATIC_ASSERT(S_IXOTH > 0 && (S_IXOTH & (S_IXOTH - 1)) == 0, HAVE_PMODE);
 
 // For the sake of allowing uninterrupted counting from 0 to overflow, NA values
 //  for unsigned types should be equivalent to UINTn_MAX.
@@ -178,12 +183,52 @@ SEXP mmap_mkFlags (SEXP _flags) {
       flags_bit = flags_bit | MAP_SHARED; continue;
     } else if(strcmp(cur_string,"MAP_PRIVATE") == 0) {
       flags_bit = flags_bit | MAP_PRIVATE; continue;
+    } else if(strcmp(cur_string,"MAP_ANONYMOUS") == 0) {
+      flags_bit = flags_bit | MAP_ANONYMOUS; continue;
 #ifndef WIN32
     } else if(strcmp(cur_string,"MAP_FIXED") == 0) {
       flags_bit = flags_bit | MAP_FIXED; continue;
     } else if(strcmp(cur_string,"MAP_NORESERVE") == 0) {
       flags_bit = flags_bit | MAP_NORESERVE; continue;
 #endif
+
+    // mmap()'s open()/shm_open() oflag bits; natively supported by MSVCRT too.
+    } else if(strcmp(cur_string,"O_RDONLY") == 0) {
+      flags_bit = flags_bit | O_RDONLY; continue;
+    } else if(strcmp(cur_string,"O_RDWR") == 0) {
+      flags_bit = flags_bit | O_RDWR; continue;
+    } else if(strcmp(cur_string,"O_CREAT") == 0) {
+      flags_bit = flags_bit | O_CREAT; continue;
+    } else if(strcmp(cur_string,"O_EXCL") == 0) {
+      flags_bit = flags_bit | O_EXCL; continue;
+    } else if(strcmp(cur_string,"O_TRUNC") == 0) {
+      flags_bit = flags_bit | O_TRUNC; continue;
+
+    // mmap()'s open()/shm_open() mode bits; partly supported by MSVCRT too.
+    } else if(strcmp(cur_string,"S_IRUSR") == 0) {
+      flags_bit = flags_bit | S_IRUSR; continue;
+    } else if(strcmp(cur_string,"S_IWUSR") == 0) {
+      flags_bit = flags_bit | S_IWUSR; continue;
+    } else if(strcmp(cur_string,"S_IXUSR") == 0) {
+      flags_bit = flags_bit | S_IXUSR; continue;
+    } else if(strcmp(cur_string,"S_IRWXU") == 0) {
+      flags_bit = flags_bit | S_IRWXU; continue;
+    } else if(strcmp(cur_string,"S_IRGRP") == 0) {
+      flags_bit = flags_bit | S_IRGRP; continue;
+    } else if(strcmp(cur_string,"S_IWGRP") == 0) {
+      flags_bit = flags_bit | S_IWGRP; continue;
+    } else if(strcmp(cur_string,"S_IXGRP") == 0) {
+      flags_bit = flags_bit | S_IXGRP; continue;
+    } else if(strcmp(cur_string,"S_IRWXG") == 0) {
+      flags_bit = flags_bit | S_IRWXG; continue;
+    } else if(strcmp(cur_string,"S_IROTH") == 0) {
+      flags_bit = flags_bit | S_IROTH; continue;
+    } else if(strcmp(cur_string,"S_IWOTH") == 0) {
+      flags_bit = flags_bit | S_IWOTH; continue;
+    } else if(strcmp(cur_string,"S_IXOTH") == 0) {
+      flags_bit = flags_bit | S_IXOTH; continue;
+    } else if(strcmp(cur_string,"S_IRWXO") == 0) {
+      flags_bit = flags_bit | S_IRWXO; continue;
 
     // madvise() advice enum
     } else if(strcmp(cur_string,"MADV_NORMAL") == 0) {
@@ -267,7 +312,8 @@ SEXP mmap_munmap (SEXP mmap_obj) {
   //  unmapped. Files for which the last view has not yet been unmapped are held
   //  open with no sharing restrictions."
   CloseHandle(mh);
-  CloseHandle(fd);
+  if(fd != INVALID_HANDLE_VALUE)
+    CloseHandle(fd);
   R_ClearExternalPtr(findVar(install("data"),mmap_obj));
   return(ScalarLogical(success));
 }
@@ -295,6 +341,9 @@ SEXP mmap_munmap (SEXP mmap_obj) {
       rpwarning("unable to munmap file: %s");
   }
 
+  SEXP fd_obj = findVar(install("filedesc"), mmap_obj);
+  if(strcmp(CHAR(asChar(getAttrib(fd_obj, install("backedby")))), "shared") == 0)
+    shm_unlink(CHAR(asChar(getAttrib(fd_obj, R_NamesSymbol))));
   // We don't actually need to keep the fildes around but instead can just
   //  `close()` it after `mmap()` in `mmap_mmap()`: "the mmap() function adds an
   //  extra reference to the file associated with the file descriptor fildes
@@ -308,29 +357,360 @@ SEXP mmap_munmap (SEXP mmap_obj) {
 
 /* mmap_mmap {{{ */
 #ifdef WIN32
+int get_acl_max_prot_and_acc (SECURITY_DESCRIPTOR *sec_des, GENERIC_MAPPING mapping, int oflag, DWORD *max_prot, DWORD *max_acc) {
+  HANDLE token = INVALID_HANDLE_VALUE;
+  HANDLE imp_token = INVALID_HANDLE_VALUE;
+  DWORD token_acc = TOKEN_IMPERSONATE | TOKEN_READ | TOKEN_DUPLICATE;
+  DWORD granted_acc, des_acc;
+  PRIVILEGE_SET priv_set = { 0 };
+  DWORD priv_set_len = sizeof(priv_set);
+  BOOL has_r_acc, has_w_acc, has_x_acc;
+  int success = 0;
+  
+  // Allocate the resource and get the current process's effective access token.
+  if(!OpenThreadToken(GetCurrentThread(), token_acc, TRUE, &token)
+       && (GetLastError() != ERROR_NO_TOKEN || !OpenProcessToken(GetCurrentProcess(), token_acc, &token)))
+    goto done;
+  
+  // Create an impersonation token.
+  if(!DuplicateToken(token, SecurityImpersonation, &imp_token))
+    goto done;
+  
+  // FILE_GENERIC_READ (FILE_READ_DATA, FILE_READ_EA, FILE_READ_ATTRIBUTES, STANDARD_RIGHTS_READ (READ_CONTROL), SYNCHRONIZE)
+  des_acc = GENERIC_READ;
+  MapGenericMask(&des_acc, &mapping);
+  if(!AccessCheck(sec_des, imp_token, des_acc, &mapping, &priv_set, &priv_set_len, &granted_acc, &has_r_acc))
+    goto done;
+  assert(!!has_r_acc == !!(granted_acc & FILE_READ_DATA));
+  
+  // FILE_GENERIC_WRITE (FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES, STANDARD_RIGHTS_WRITE (READ_CONTROL), SYNCHRONIZE)
+  des_acc = GENERIC_WRITE;
+  MapGenericMask(&des_acc, &mapping);
+  if(!AccessCheck(sec_des, imp_token, des_acc, &mapping, &priv_set, &priv_set_len, &granted_acc, &has_w_acc))
+    goto done;
+  assert(!!has_w_acc == !!(granted_acc & FILE_WRITE_DATA));
+  
+  // FILE_GENERIC_EXECUTE (FILE_EXECUTE, FILE_READ_ATTRIBUTES, STANDARD_RIGHTS_EXECUTE (READ_CONTROL), SYNCHRONIZE)
+  des_acc = GENERIC_EXECUTE;
+  MapGenericMask(&des_acc, &mapping);
+  if(!AccessCheck(sec_des, imp_token, des_acc, &mapping, &priv_set, &priv_set_len, &granted_acc, &has_x_acc))
+    goto done;
+  assert(!!has_x_acc == !!(granted_acc & FILE_EXECUTE));
+  
+  has_r_acc = !!(has_r_acc && ((oflag & O_RDWR) == O_RDWR || (oflag & O_RDONLY) == O_RDONLY));
+  has_w_acc = !!(has_w_acc && ((oflag & O_RDWR) == O_RDWR || (oflag & O_WRONLY) == O_WRONLY));
+  switch(has_r_acc << 2 | has_w_acc << 1 | has_x_acc << 0) {
+  case 1 << 2 | 1 << 1 | 1 << 0: // rwx
+    *max_prot = PAGE_EXECUTE_READWRITE;
+    *max_acc = FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE;
+    break;
+  case 1 << 2 | 1 << 1 | 0 << 0: // rw-
+    *max_prot = PAGE_READWRITE;
+    *max_acc = FILE_MAP_READ | FILE_MAP_WRITE;
+    break;
+  case 1 << 2 | 0 << 1 | 1 << 0: // r-x
+    *max_prot = PAGE_EXECUTE_READ;
+    *max_acc = FILE_MAP_READ | FILE_MAP_EXECUTE;
+    break;
+  case 1 << 2 | 0 << 1 | 0 << 0: // r--
+    *max_prot = PAGE_READONLY;
+    *max_acc = FILE_MAP_READ;
+    break;
+  case 0 << 2 | 0 << 1 | 1 << 0: // --x
+    *max_prot = PAGE_EXECUTE;
+    *max_acc = FILE_MAP_EXECUTE;
+    break;
+  default: // -wx, -w-, ---
+    *max_prot = PAGE_NOACCESS;
+    *max_acc = 0;
+    break;
+  }
+  
+  success = 1;
+done:
+  if(imp_token != INVALID_HANDLE_VALUE) CloseHandle(imp_token);
+  if(token != INVALID_HANDLE_VALUE) CloseHandle(token);
+  return success;
+}
+
+int get_pmode_max_prot_and_acc (int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
+  switch(pmode & (S_IRUSR | S_IWUSR | S_IXUSR)) {
+  case S_IRUSR | S_IWUSR | S_IXUSR: // rwx
+    *max_prot = PAGE_EXECUTE_READWRITE;
+    *max_acc = FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE;
+    break;
+  case S_IRUSR | S_IWUSR | 0      : // rw-
+    *max_prot = PAGE_READWRITE;
+    *max_acc = FILE_MAP_READ | FILE_MAP_WRITE;
+    break;
+  case S_IRUSR | 0       | S_IXUSR: // r-x
+    *max_prot = PAGE_EXECUTE_READ;
+    *max_acc = FILE_MAP_READ | FILE_MAP_EXECUTE;
+    break;
+  case S_IRUSR | 0       | 0      : // r--
+    *max_prot = PAGE_READONLY;
+    *max_acc = FILE_MAP_READ;
+    break;
+  case 0       | 0       | S_IXUSR: // --x
+    *max_prot = PAGE_EXECUTE;
+    *max_acc = FILE_MAP_EXECUTE;
+    break;
+  default: // -wx, -w-, ---
+    *max_prot = PAGE_NOACCESS;
+    *max_acc = 0;
+    break;
+  }
+  return 1;
+}
+
+int get_file_max_prot_and_acc (LPCTSTR file, int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
+  GENERIC_MAPPING mapping = { FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
+  SECURITY_DESCRIPTOR *secDes = NULL;
+  DWORD secDesSz;
+  int success = 0;
+  // Fetch the buffer size needed for TokenOwner by passing NULL and 0.
+  if(!GetFileSecurity(file, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, 0, &secDesSz) && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    if(GetLastError() == ERROR_FILE_NOT_FOUND)
+      success = get_pmode_max_prot_and_acc(pmode, oflag, max_prot, max_acc);
+    goto done;
+  }
+  // Allocate the buffer on the heap.
+  if((secDes = (SECURITY_DESCRIPTOR *)LocalAlloc(LPTR, secDesSz)) == NULL)
+    goto done;
+  // Fill the buffer with the usrSID.
+  if(!GetFileSecurity(file, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, secDes, secDesSz, &secDesSz))
+    goto done;
+  success = get_acl_max_prot_and_acc(secDes, mapping, oflag, max_prot, max_acc);
+  
+done:
+  if(secDes != NULL) LocalFree(secDes);
+  return success;
+}
+
+int get_share_max_prot_and_acc (LPCTSTR sharename, int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
+  GENERIC_MAPPING mapping = { FILE_MAP_READ, FILE_MAP_WRITE, FILE_MAP_EXECUTE, FILE_MAP_ALL_ACCESS };
+  SECURITY_DESCRIPTOR *secDes = NULL;
+  int success = 0;
+  if(GetNamedSecurityInfo((LPTSTR)sharename, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, (void **)&secDes) != ERROR_SUCCESS) {
+    if(GetLastError() == ERROR_FILE_NOT_FOUND)
+      success = get_pmode_max_prot_and_acc(pmode, oflag, max_prot, max_acc);
+    goto done;
+  }
+  success = get_acl_max_prot_and_acc(secDes, mapping, oflag, max_prot, max_acc);
+  
+done:
+  if(secDes != NULL) LocalFree(secDes);
+  return success;
+}
+
+// open() mode bits -> ACL access permissions bits.
+DWORD translate_pmode_des_acc (int pmode, int r, int w, int x) {
+  DWORD des_acc = 0;
+  
+  if(pmode & r)
+    des_acc |= GENERIC_READ;
+  if(pmode & w)
+    des_acc |= GENERIC_WRITE;
+  if(pmode & x)
+    des_acc |= GENERIC_EXECUTE;
+  if((pmode & (r | w | x)) == (r | w | x))
+    des_acc = GENERIC_ALL;
+  
+  return des_acc;
+}
+
+struct sec_desc_refs {
+  EXPLICIT_ACCESS ea[3];
+  HANDLE token;
+  TOKEN_OWNER *tokUsr;
+  TOKEN_PRIMARY_GROUP *tokGrp;
+  SID *othSID;
+  ACL *acl;
+};
+
+int translate_pmode_sec_attr (SECURITY_ATTRIBUTES *secAttr, SECURITY_DESCRIPTOR *secDesc, struct sec_desc_refs *refs, int pmode) {
+  refs->token = INVALID_HANDLE_VALUE;
+  refs->tokUsr = NULL;
+  refs->tokGrp = NULL;
+  refs->othSID = NULL;
+  refs->acl = NULL;
+  
+  int success = 0;
+  DWORD tokUsrSz, tokGrpSz;
+  DWORD errnum;
+  
+  // Initialize secDesc to an empty SECURITY_DESCRIPTOR.
+  if(!InitializeSecurityDescriptor(secDesc, SECURITY_DESCRIPTOR_REVISION))
+    goto done; // 0
+  
+  // Allocate the resource and get the current process's effective (impersonated) access token.
+  if(!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &refs->token)
+       && (GetLastError() != ERROR_NO_TOKEN || !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &refs->token)))
+    goto done; // 0
+  
+  // Fetch the buffer size needed for TokenOwner by passing NULL and 0.
+  if(!GetTokenInformation(refs->token, TokenOwner, NULL, 0, &tokUsrSz) && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+    goto done; // 1
+  // Allocate the buffer on the heap.
+  if((refs->tokUsr = (TOKEN_OWNER *)LocalAlloc(LPTR, tokUsrSz)) == NULL)
+    goto done; // 1
+  // Fill the buffer with the usrSID.
+  if(!GetTokenInformation(refs->token, TokenOwner, refs->tokUsr, tokUsrSz, &tokUsrSz))
+    goto done; // 2
+  
+  // Fetch the buffer size needed for TokenPrimaryGroup by passing NULL and 0.
+  if(!GetTokenInformation(refs->token, TokenPrimaryGroup, NULL, 0, &tokGrpSz) && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+    goto done; // 2
+  // Allocate the buffer on the heap.
+  if((refs->tokGrp = (TOKEN_PRIMARY_GROUP *)LocalAlloc(LPTR, tokGrpSz)) == NULL)
+    goto done; // 2
+  // Fill the buffer with the grpSID.
+  if(!GetTokenInformation(refs->token, TokenPrimaryGroup, refs->tokGrp, tokGrpSz, &tokGrpSz))
+    goto done; // 3
+  
+  // Allocate and fill the buffer with the othSID on the heap.
+  if(!AllocateAndInitializeSid(&(SID_IDENTIFIER_AUTHORITY){SECURITY_WORLD_SID_AUTHORITY}, 1,
+                               SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, (void**)&refs->othSID))
+    goto done; // 3
+  
+  // Initialize all members in ea to an empty EXPLICIT_ACCESS.
+  ZeroMemory(&refs->ea, 3 * sizeof(EXPLICIT_ACCESS));
+  
+  refs->ea[0].grfAccessPermissions = translate_pmode_des_acc(pmode, S_IRUSR, S_IWUSR, S_IXUSR);
+  refs->ea[0].grfAccessMode = SET_ACCESS;
+  refs->ea[0].grfInheritance= CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+  refs->ea[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  refs->ea[0].Trustee.TrusteeType = TRUSTEE_IS_USER;
+  refs->ea[0].Trustee.ptstrName  = (LPTSTR) refs->tokUsr->Owner;
+  
+  refs->ea[1].grfAccessPermissions = translate_pmode_des_acc(pmode, S_IRGRP, S_IWGRP, S_IXGRP);
+  refs->ea[1].grfAccessMode = SET_ACCESS;
+  refs->ea[1].grfInheritance= CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+  refs->ea[1].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  refs->ea[1].Trustee.TrusteeType = TRUSTEE_IS_GROUP;
+  refs->ea[1].Trustee.ptstrName  = (LPTSTR) refs->tokGrp->PrimaryGroup;
+  
+  refs->ea[2].grfAccessPermissions = translate_pmode_des_acc(pmode, S_IROTH, S_IWOTH, S_IXOTH);
+  refs->ea[2].grfAccessMode = SET_ACCESS;
+  refs->ea[2].grfInheritance= CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+  refs->ea[2].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  refs->ea[2].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+  refs->ea[2].Trustee.ptstrName  = (LPTSTR) refs->othSID;
+  
+  // Allocate a new ACL for the defined `ea` on the heap and assign it to `secDesc`.
+  if((errnum = SetEntriesInAcl(3, refs->ea, NULL, &refs->acl)) != ERROR_SUCCESS) {
+    SetLastError(errnum);
+    goto done; // 4
+  }
+  if(!SetSecurityDescriptorDacl(secDesc, 1, refs->acl, 0))
+    goto done; // 5
+  
+  secAttr->nLength = sizeof(SECURITY_ATTRIBUTES);
+  secAttr->lpSecurityDescriptor = secDesc;
+  secAttr->bInheritHandle = 1;
+  success = 1;
+  
+done:
+  return success;
+}
+
+void free_sec_desc (struct sec_desc_refs *refs) {
+  // NOTE: the resources must be deallocated in the same order as they are
+  //  allocated in `translate_pmode_sec_attr()` so that we can early exit.
+  // If CloseHandle(), LocalFree(), or FreeSid() fail, we don't care. Restore
+  //  the current errno at the end in case it is overwritten.
+  DWORD errnum = GetLastError();
+  
+  // 0
+  if(refs->token == INVALID_HANDLE_VALUE) goto done;
+  // 1
+  CloseHandle(refs->token);
+  refs->token = INVALID_HANDLE_VALUE;
+  if(refs->tokUsr == NULL) goto done;
+  // 2
+  LocalFree(refs->tokUsr);
+  refs->tokUsr = NULL;
+  if(refs->tokGrp == NULL) goto done;
+  // 3
+  LocalFree(refs->tokGrp);
+  refs->tokGrp = NULL;
+  if(refs->othSID == NULL) goto done;
+  // 4
+  FreeSid(refs->othSID);
+  refs->othSID = NULL;
+  if(refs->acl == NULL) goto done;
+  // 5
+  LocalFree(refs->acl);
+  refs->acl = NULL;
+  
+done:
+  SetLastError(errnum);
+}
+
+// open() oflag bits -> CreateFile() desired access bits.
+DWORD translate_oflag_des_acc (int oflag, DWORD max_acc) {
+  // Not specifying exactly one of O_RDONLY or O_RDWR is unspecified behavior so
+  //  don't bother checking that particular case.
+  if((oflag & O_RDWR) == O_RDWR) {
+    if(max_acc & FILE_MAP_EXECUTE)
+      return GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE;
+    else
+      return GENERIC_READ | GENERIC_WRITE;
+  } else if((oflag & O_RDONLY) == O_RDONLY) {
+    if(max_acc & FILE_MAP_EXECUTE)
+      return GENERIC_READ | GENERIC_EXECUTE;
+    else
+      return GENERIC_READ;
+  }
+  return 0;
+}
+
+// open() oflag bits -> CreateFile() creation disposition enum.
+DWORD translate_oflag_creat_disp (int oflag) {
+  // O_EXCL without O_CREAT behaves as if neither was specified.
+  switch(oflag & (O_CREAT | O_EXCL | O_TRUNC)) {
+  default:
+  case 0       | 0      | 0:
+  case 0       | O_EXCL | 0:
+    // Open a file; fail if it doesn't already exist.
+    return OPEN_EXISTING;
+  case 0       | 0      | O_TRUNC:
+  case 0       | O_EXCL | O_TRUNC:
+    // Clear a file; fail if it doesn't already exist.
+    return TRUNCATE_EXISTING;
+  case O_CREAT | 0      | 0:
+    // Open a file; create one first if it doesn't already exist.
+    return OPEN_ALWAYS;
+  case O_CREAT | 0      | O_TRUNC:
+    // Clear a file; create one first if it doesn't already exist.
+    return CREATE_ALWAYS;
+  case O_CREAT | O_EXCL | 0:
+  case O_CREAT | O_EXCL | O_TRUNC:
+    // Clear a file; fail if it does already exist.
+    return CREATE_NEW;
+  }
+}
+
 // mmap() prot bits and flags bits -> MapViewOfFile() prot enum.
 // mprotect() prot bits -> VirtualProtect() prot enum.
-int translate_prot_and_flags (int prot, int flags) {
+DWORD translate_prot_and_flags (int prot, int flags) {
   if(prot & PROT_WRITE) {
     if(flags & MAP_SHARED) {
-      if(prot & PROT_EXEC) {
+      if(prot & PROT_EXEC)
         return PAGE_EXECUTE_READWRITE;
-      } else {
+      else
         return PAGE_READWRITE;
-      }
     } else if(flags & MAP_PRIVATE) {
-      if(prot & PROT_EXEC) {
+      if(prot & PROT_EXEC)
         return PAGE_EXECUTE_WRITECOPY;
-      } else {
+      else
         return PAGE_WRITECOPY;
-      }
     }
   } else if(prot & PROT_READ) {
-    if(prot & PROT_EXEC) {
+    if(prot & PROT_EXEC)
       return PAGE_EXECUTE_READ;
-    } else {
+    else
       return PAGE_READONLY;
-    }
   } else if(prot == PROT_NONE) {
     return PAGE_NOACCESS;
   }
@@ -339,10 +719,10 @@ int translate_prot_and_flags (int prot, int flags) {
 }
 
 // madvise() advice enum -> CreateFile() flag bits.
-int translate_advice_cf(SEXP _advice) {
+DWORD translate_advice_cf (SEXP _advice) {
   int *advice_p;
   R_len_t i, len = length(_advice);
-  int cf_advice = 0;
+  DWORD cf_advice = 0;
   
   PROTECT(_advice = coerceVector(_advice, INTSXP));
   advice_p = INTEGER(_advice);
@@ -364,37 +744,131 @@ int translate_advice_cf(SEXP _advice) {
   return cf_advice;
 }
 
-SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
-                SEXP _flags, SEXP _advice, SEXP _len, SEXP _off, SEXP _pageoff) {
+SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _sharename, SEXP _prot,
+                SEXP _flags, SEXP _oflag, SEXP _pmode, SEXP _advice,
+                SEXP _len, SEXP _off, SEXP _pageoff) {
   unsigned char *data;
-  struct stat st;
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
+  int oflag = (xlength(_flags) == 0) ? 0 : asInteger(_oflag);
+  int pmode = (xlength(_pmode) == 0) ? 0 : asInteger(_pmode);
+  int flags = asInteger(_flags);
+  SECURITY_ATTRIBUTES secAttr;
+  SECURITY_DESCRIPTOR secDesc;
+  struct sec_desc_refs tmp_resrc;
+  int zero_view = 0;
   
   assert(asReal(_pageoff) <= INT_MAX_VALUE);
   if(asReal(_len) + asInteger(_pageoff) > (SIZE_T)-1)
     error("unable to mmap file: Requested length is too high.");
   
-  // Give the system's most permissive access to `CreateFile()` first so that we
-  //  can give the most permissive protections to `CreateFileMapping()` and the
-  //  most permissive access to `MapViewOfFile()`.
-  // Then we can grant more permissions of the pointer at any time without a
-  //  problem through `VirtualProtect()` in `mmap_mprotect()`. Otherwise, we
-  //  could only deny existing permissions later but not grant new ones.
-  stat(CHAR(asChar(_fildesc)), &st);
-  HANDLE hFile = CreateFile(CHAR(asChar(_fildesc)),
-                  GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE,
-                  FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
-                  translate_advice_cf(_advice), NULL);
-  if(hFile == INVALID_HANDLE_VALUE)
-    rperror("unable to open file: %s");
-  if((intptr_t)hFile > INT_MAX || (intptr_t)hFile < INT_MIN) {
-    CloseHandle(hFile);
-    error("unable to open file: File descriptor overflow.");
+  if((!(flags & MAP_PRIVATE) && !(flags & MAP_SHARED)) || ((flags & MAP_PRIVATE) && (flags & MAP_SHARED)))
+    error("unable to mmap file: Exactly one of MAP_PRIVATE or MAP_SHARED must be set.");
+  
+  HANDLE hFile, hMap;
+  DWORD max_prot, max_acc;
+  
+  ULARGE_INTEGER len = {.QuadPart  = (uint64_t)(asReal(_len) + asInteger(_pageoff) + asReal(_off))};
+  if(xlength(_fildesc) != 0 && xlength(_sharename) != 0) {
+    error("unable to mmap file: File name and share name were both given.");
+  } else if(xlength(_fildesc) != 0) {
+    if(flags == MAP_ANONYMOUS)
+      error("unable to mmap file: File name was given but MAP_ANONYMOUS was set.");
+    
+    // Give the system's most permissive access to `CreateFile()` first so that
+    //  we can give the most permissive protections to `CreateFileMapping()` and
+    //  the most permissive access to `MapViewOfFile()`.
+    // Then we can grant more permissions of the pointer at any time without a
+    //  problem through `VirtualProtect()` in `mmap_mprotect()`. Otherwise, we
+    //  could only deny existing permissions later but not grant new ones.
+    if(!get_file_max_prot_and_acc(CHAR(asChar(_fildesc)), pmode, oflag, &max_prot, &max_acc))
+      rperror("unable to open file: %s");
+    
+    if(!translate_pmode_sec_attr(&secAttr, &secDesc, &tmp_resrc, pmode)) {
+      free_sec_desc(&tmp_resrc);
+      rperror("unable to open file: %s");
+    }
+    hFile = CreateFile(CHAR(asChar(_fildesc)),
+                    translate_oflag_des_acc(oflag, max_acc),
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, &secAttr,
+                    translate_oflag_creat_disp(oflag),
+                    translate_advice_cf(_advice), NULL);
+    if(hFile == INVALID_HANDLE_VALUE) {
+      free_sec_desc(&tmp_resrc);
+      rperror("unable to open file: %s");
+    }
+    if((intptr_t)hFile > INT_MAX || (intptr_t)hFile < INT_MIN) {
+      free_sec_desc(&tmp_resrc);
+      CloseHandle(hFile);
+      error("unable to open file: File descriptor overflow.");
+    }
+    
+    hMap = CreateFileMapping(hFile, &secAttr, max_prot, len.HighPart, len.LowPart, NULL);
+    free_sec_desc(&tmp_resrc);
+  } else if(xlength(_sharename) != 0) {
+    if(flags == MAP_ANONYMOUS)
+      error("unable to mmap file: Share name was given but MAP_ANONYMOUS was set.");
+    
+    if(!get_share_max_prot_and_acc(CHAR(asChar(_sharename)), pmode, oflag, &max_prot, &max_acc))
+      rperror("unable to open file: %s");
+    
+    hFile = INVALID_HANDLE_VALUE;
+    if(oflag & O_CREAT) {
+      if(!translate_pmode_sec_attr(&secAttr, &secDesc, &tmp_resrc, pmode)) {
+        free_sec_desc(&tmp_resrc);
+        rperror("unable to open file: %s");
+      }
+      hMap = CreateFileMapping(hFile, &secAttr, max_prot, len.HighPart, len.LowPart, CHAR(asChar(_sharename)));
+      free_sec_desc(&tmp_resrc);
+      if(hMap != NULL && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if(oflag & O_EXCL) {
+          CloseHandle(hMap);
+          hMap = NULL;
+        } else if(oflag & O_TRUNC) {
+          zero_view = 1;
+        }
+      }
+    } else {
+      // MapViewOfFile() doesn't complain if `len` is greater than the initial
+      //  `len` of the shared memory mapping. If it ever does, we must use
+      //  `CreateFileMapping()` instead and throw an error if that call does not
+      //  throw `ERROR_ALREADY_EXISTS`.
+      hMap = OpenFileMapping(max_acc, 1, CHAR(asChar(_sharename)));
+      if(oflag & O_TRUNC)
+        zero_view = 1;
+    }
+  } else {
+    if(!(flags & MAP_ANONYMOUS))
+      error("unable to mmap file: Neither file name and share name were given but MAP_ANONYMOUS was not set.");
+    if(xlength(_oflag) != 0)
+      error("unable to mmap file: oflag was given but neither file name nor share name were given.");
+    if(xlength(_pmode) != 0)
+      error("unable to mmap file: pmode was given but neither file name nor share name were given.");
+    // `MAP_ANONYMOUS | MAP_SHARED` is meaningful on Linux because processes can
+    //  be forked after the call to `mmap()` and the child will retain the same
+    //  memory mapping. There is no such functionality on Windows, so it is
+    //  impossible to share the nameless memory mapping with anyone else.
+    // Additionally, accepting a non-zero `off` is not meaningful for
+    //  `MAP_ANONYMOUS` because all of the bytes skipped over will always be
+    //  initialized to 0 and will only ever be accessible to us.
+    // Still, we will just let Win32 decide whether to accept these useless
+    //  combinations of parameters. Our own parameter checking should merely
+    //  ensure that _fildesc and _sharename are ignored when `MAP_ANONYMOUS` is
+    //  set, to imitate the interface for most Unix-like operating systems.
+    // Similarly, we leave much of the parameter checking to the kernel in our
+    //  POSIX implementation in order to provide as low-level an interface as
+    //  possible. For example, when `flags & MAP_ANONYMOUS`, we'll let FreeBSD
+    //  complain if `off != 0 || fildes != -1`; but we'll also let Solaris,
+    //  OpenBSD, NetBSD, HP-UX, and AIX complain only if `fildes != -1`; and let
+    //  Linux just ignore `fildes`; and let macOS just ignore `off`.
+    
+    max_prot = PAGE_EXECUTE_READWRITE;
+    max_acc = FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE;
+    
+    hFile = INVALID_HANDLE_VALUE;
+    hMap = CreateFileMapping(hFile, NULL, max_prot, len.HighPart, len.LowPart, NULL);
   }
 
-  DWORD prot = PAGE_EXECUTE_READWRITE;
-  HANDLE hMap = CreateFileMapping(hFile, NULL, prot, 0, 0, NULL);
   if(hMap == NULL) {
     CloseHandle(hFile);
     rperror("unable to mmap file: %s");
@@ -405,17 +879,21 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
     error("unable to mmap file: Map handle overflow.");
   }
   ULARGE_INTEGER off = {.QuadPart  = (uint64_t)asReal(_off)};
-  data = (unsigned char *)MapViewOfFile(hMap, FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE, off.HighPart, off.LowPart, (SIZE_T)(asReal(_len) + asInteger(_pageoff)));
+  data = (unsigned char *)MapViewOfFile(hMap, max_acc, off.HighPart, off.LowPart, (SIZE_T)(asReal(_len) + asInteger(_pageoff)));
   if(data == NULL) {
     CloseHandle(hMap);
     CloseHandle(hFile);
     rperror("unable to mmap file: %s");
   }
-  if(!VirtualProtect(data, (SIZE_T)(asReal(_len) + asInteger(_pageoff)), translate_prot_and_flags(asInteger(_prot), asInteger(_flags)), &prot)) {
+  if(!VirtualProtect(data, (SIZE_T)(asReal(_len) + asInteger(_pageoff)), translate_prot_and_flags(asInteger(_prot), flags), &max_prot)) {
     CloseHandle(hMap);
     CloseHandle(hFile);
     rperror("unable to mmap file: %s");
   }
+  if(zero_view)
+    // This doesn't quite do the trick when `MAP_PRIVATE` is set, but it's the
+    //  best we can do when `O_TRUNC` is specified for shared memory.
+    ZeroMemory(data, (SIZE_T)(asReal(_len) + asInteger(_pageoff)));
   
   data = data + asInteger(_pageoff); /* advance ptr to byte offset from page boundary */
 
@@ -439,8 +917,9 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
 #else
 SEXP mmap_madvise (SEXP, SEXP, SEXP);
 
-SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
-                SEXP _flags, SEXP _advice, SEXP _len, SEXP _off, SEXP _pageoff) {
+SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _sharename, SEXP _prot,
+                SEXP _flags, SEXP _oflag, SEXP _pmode, SEXP _advice,
+                SEXP _len, SEXP _off, SEXP _pageoff) {
   int fd;
   unsigned char *data;
   struct stat st;
@@ -449,10 +928,31 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   if(asReal(_len) + asInteger(_pageoff) > SIZE_MAX)
     error("unable to mmap file: Requested length is too high.");
   
-  stat(CHAR(asChar(_fildesc)), &st);
-  fd = open(CHAR(asChar(_fildesc)), O_RDWR);
-  if(fd < 0)
-    rperror("unable to open file: %s");
+  if(xlength(_fildesc) != 0 && xlength(_sharename) != 0) {
+    error("unable to mmap file: File name and share name were both given.");
+  } else if(xlength(_fildesc) != 0) {
+    fd = open(CHAR(asChar(_fildesc)), asInteger(_oflag), (mode_t)asInteger(_pmode));
+    if(fd < 0)
+      rperror("unable to open file: %s");
+  } else if(xlength(_sharename) != 0) {
+    fd = shm_open(CHAR(asChar(_sharename)), asInteger(_oflag), (mode_t)asInteger(_pmode));
+    if(fd < 0)
+      rperror("unable to open file: %s");
+  } else {
+    if(xlength(_oflag) != 0)
+      error("unable to mmap file: oflag was given but neither file name nor share name were given.");
+    if(xlength(_pmode) != 0)
+      error("unable to mmap file: pmode was given but neither file name nor share name were given.");
+    fd = -1;
+  }
+  
+  // Lengthen file if necessary.
+  if(fd >= 0) {
+    fstat(fd, &st);
+    if((off_t)asReal(_len) > st.st_size)
+      if(!!ftruncate(fd, (off_t)asReal(_len)))
+        rperror("unable to mmap file: %s");
+  }
   
   data = mmap((caddr_t)0, 
               (size_t)(asReal(_len) + asInteger(_pageoff)), 
@@ -520,6 +1020,7 @@ SEXP mmap_is_mmapped (SEXP mmap_obj) {
 SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
   unsigned char *data;
   data = MMAP_DATA(mmap_obj);
+  HANDLE fd = (HANDLE)MMAP_FD(mmap_obj);
   int flags = asInteger(_flags);
   int success;
   
@@ -527,15 +1028,15 @@ SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
   if(!success)
     warning("unable to msync file: Exactly one of MS_SYNC or MS_ASYNC must be set.");
   
-  if(success) {
+  if(success && fd != INVALID_HANDLE_VALUE) {
     success = !!FlushViewOfFile((void *)data, (SIZE_T)MMAP_SIZE(mmap_obj));
     if(success && (flags & MS_SYNC))
-      success = !!FlushFileBuffers((HANDLE)MMAP_FD(mmap_obj));
+      success = !!FlushFileBuffers(fd);
     if(!success)
       rpwarning("unable to msync file: %s");
   }
   
-  if(success && !(MMAP_FLAGS(mmap_obj) & MAP_PRIVATE)) {
+  if(success && fd != INVALID_HANDLE_VALUE && (MMAP_FLAGS(mmap_obj) & MAP_SHARED)) {
     // "When modifying a file through a mapped view, the last modification
     //  timestamp may not be updated automatically."
     // Ideally, we would only update the modification time if the file were
@@ -544,7 +1045,7 @@ SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
     FILETIME ft;
     SYSTEMTIME st;
     GetSystemTime(&st);
-    if(!SystemTimeToFileTime(&st, &ft) || !SetFileTime((HANDLE)MMAP_FD(mmap_obj), (LPFILETIME)NULL, (LPFILETIME)NULL, &ft))
+    if(!SystemTimeToFileTime(&st, &ft) || !SetFileTime(fd, (LPFILETIME)NULL, (LPFILETIME)NULL, &ft))
       rpwarning("unable to msync file: %s");
   }
   

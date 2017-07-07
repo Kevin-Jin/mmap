@@ -56,8 +56,9 @@ summary.mmap <- function(object) { str(object) }
 print.mmap <- function(x, ...) {
   stopifnot(is.mmap(x))
   file_name <- names(x$filedesc)
-  if(nchar(file_name) > 10)
+  if(!is.null(file_name) && nchar(file_name) > 10)
     file_name <- paste(substring(file_name,0,10),"...",sep="")
+  file_name <- paste("(", attr(x$filedesc, "backedby"), ")", file_name, sep = "")
   type_name <- switch(typeof(x$storage.mode),
                       "list"="struct",
                       "integer"="int",
@@ -102,35 +103,52 @@ mmapFlags <- function(...) {
 }
 
 # S3 constructor
-mmap <- function(file, mode=int32(), 
+mmap <- function(mode=int32(), file=NULL, share.name=NULL, 
                  extractFUN=NULL, replaceFUN=NULL,
                  prot=mmapFlags("PROT_READ","PROT_WRITE"),
-                 flags=mmapFlags("MAP_SHARED"),advice=mmapFlags("MADV_NORMAL"),len,off=0L,
-                 ...) {
-    if(missing(file))
-      stop("'file' must be specified")
+                 flags=if(is.null(file) && is.null(share.name)) mmapFlags("MAP_PRIVATE", "MAP_ANONYMOUS") else mmapFlags("MAP_SHARED"),
+                 oflag=if(!is.null(file)) mmapFlags("O_RDWR") else if(!is.null(share.name)) mmapFlags("O_RDWR", "O_CREAT"),
+                 pmode=if(!is.null(file) || !is.null(share.name)) mmapFlags("S_IRWXU", "S_IRGRP", "S_IWGRP", "S_IROTH"),
+                 advice=mmapFlags("MADV_NORMAL"), len, off=0L, ...) {
     # pageoff is the offset from page boundary
     # off is the page-aligned offset
     #   e.g. off=22 would set off=0 and pageoff=22 on a system with 4096 page sizing
     pageoff <- off %% allocation.granularity()
     off <- off - pageoff
     if(missing(len))
-      len <- file.info(file)$size - off - pageoff
-    else
-      len <- min(file.info(file)$size - off - pageoff, len)
+      if(!is.null(file) && file.exists(file))
+        len <- file.info(file)$size - off - pageoff
+      else
+        stop("Length must be given if file is not given or does not exist")
     
+    # `oflag` parameter of `open()` specifies the file descriptor's permissions.
+    # `pmode` parameter of `open()` specifies the permissions of any newly
+    #  created files and is applicable only when `oflag & O_CREAT` is true.
+    # `prot` parameter of `mmap()` specifies the memory region's permissions.
+    # `flags` parameter of `mmap()` specifies the sharing semantics when other
+    #  processes map the same file, e.g. share changes or copy-on-write.
+    # `advice` parameter of `madvise()` specifies the initial usage pattern of
+    #  the memory mapping so that disk access can be optimized.
     mmap_obj <- .Call("mmap_mmap", 
                       as.Ctype(mode),
                       file,
+                      share.name,
                       as.integer(prot), 
                       as.integer(flags), 
+                      as.integer(oflag), 
+                      as.integer(pmode), 
                       as.integer(advice), 
                       as.double(len),
                       as.double(off),
                       as.integer(pageoff),
                       PKG="mmap")
     reg.finalizer(mmap_obj, mmap_finalizer, TRUE)
-    mmap_obj$filedesc <- structure(mmap_obj$filedesc, .Names=file)
+    if(!is.null(file))
+      mmap_obj$filedesc <- structure(mmap_obj$filedesc, .Names=file, backedby="file")
+    else if(!is.null(share.name))
+      mmap_obj$filedesc <- structure(mmap_obj$filedesc, .Names=share.name, backedby="shared")
+    else
+      mmap_obj$filedesc <- structure(mmap_obj$filedesc, backedby="anon")
     mmap_obj$extractFUN <- extractFUN
     mmap_obj$replaceFUN <- replaceFUN
     class(mmap_obj) <- "mmap"
@@ -322,13 +340,13 @@ as.mmap <- function(x, mode, file,...) {
   UseMethod("as.mmap")
 }
 
-as.mmap.raw <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.raw <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   writeBin(x, file)
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.logical <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   
@@ -396,10 +414,10 @@ as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
     writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   else
     writeBin(x, file, size=nbytes)
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.integer <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.integer <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   
@@ -428,14 +446,14 @@ as.mmap.integer <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
     writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   else
     writeBin(x, file, size=nbytes)
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.double <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.double <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
-  result <- mmap(file, mode)
+  result <- mmap(mode, file, ...)
   
   # writeBin() simply strips NaN payloads, so we need to do some postprocessing.
   nas <- is.na(x) & !is.nan(x)
@@ -449,14 +467,14 @@ as.mmap.double <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   result
 }
 
-as.mmap.complex <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.complex <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.character <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.character <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   payload.cap <- sizeof(mode) - 1
   
@@ -486,10 +504,10 @@ as.mmap.character <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   }
   
   writeBin(x, file, useBytes=TRUE)
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.matrix <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.matrix <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   DIM <- dim(x)
   dim(x) <- NULL
   x <- as.mmap(x, mode, file, ...)
@@ -500,9 +518,9 @@ as.mmap.matrix <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
 as.mmap.data.frame <- function(x, mode, file=tempmmap(), ...) {
   if( !missing(mode))
     warning("'mode' argument currently unsupported")
-  mode <- as.Ctype(x, ...)
+  mode <- as.Ctype(x)
   writeBin(raw(sizeof(mode) * NROW(x)), file)
-  m <- mmap(file, mode, extractFUN=as.data.frame)
+  m <- mmap(mode, file, extractFUN=as.data.frame, ...)
   for(i in 1:NCOL(x)) {
     m[,i] <- x[,i]
   }

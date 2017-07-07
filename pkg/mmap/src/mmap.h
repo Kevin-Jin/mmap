@@ -84,6 +84,24 @@
 
 #define MADV_MERGEABLE   12             /* KSM may merge identical pages */
 #define MADV_UNMERGEABLE 13             /* KSM may not merge identical pages */
+
+// MSVC already defines user-only modes, so we just need to define group and
+//  other modes.
+#define S_IRUSR _S_IREAD                      // 0400
+#define S_IWUSR _S_IWRITE                     // 0200
+#define S_IXUSR _S_IEXEC                      // 0100
+#define S_IRWXU (S_IRUSR | S_IWUSR | S_IXUSR) // 0070
+#define S_IRGRP (S_IRUSR >> 3)                // 0040
+#define S_IWGRP (S_IWUSR >> 3)                // 0020
+#define S_IXGRP (S_IXUSR >> 3)                // 0010
+#define S_IRWXG (S_IRGRP | S_IWGRP | S_IXGRP) // 0070
+#define S_IROTH (S_IRGRP >> 3)                // 0004
+#define S_IWOTH (S_IWGRP >> 3)                // 0002
+#define S_IXOTH (S_IXGRP >> 3)                // 0001
+#define S_IRWXO (S_IROTH | S_IWOTH | S_IXOTH) // 0007
+
+#elif !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
 #endif
 
 SEXP mmap_unmmap (SEXP mmap_obj);
