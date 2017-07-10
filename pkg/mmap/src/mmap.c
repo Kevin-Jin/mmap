@@ -15,7 +15,7 @@
 #endif
 #ifndef HAVE_STRNLEN
 size_t strnlen(const char *str, size_t max) {
-  const char *end = memchr (str, 0, max);
+  const char *end = memchr(str, 0, max);
   return end ? (size_t)(end - str) : max;
 }
 #endif
@@ -122,7 +122,7 @@ This package implements all mmap-related calls:
 The conversion mechnisms to deal with translating
 raw bytes as returned by mmap into R level SEXP are
 abstracted from the user but handled in the C code.
-At present he may read data as R types: "raw", 
+At present he may read data as R types: "raw",
 "integer", and "double".
 
 Future work will entail support for more on-disk
@@ -133,20 +133,20 @@ Comments, criticisms, and concerns should be directed
 to the maintainer of the package.
 */
 
-/* initialize bitmask for bitset() type {{{*/
+/* mmap_init_globals {{{*/
 int32_t bitmask[32];
 int32_t nbitmask[32];
 
-void create_bitmask (void){
+static void create_bitmask (void) {
   int i;
   /* little-endian for now */
-  for(i=0; i<32; i++) {
-     bitmask[i] = 1 << i;
+  for(i = 0; i < 32; i++) {
+    bitmask[i] = 1 << i;
     nbitmask[i] = ~bitmask[i];
   }
 }
 
-SEXP make_bitmask () {
+SEXP mmap_init_globals (void) {
   create_bitmask();
   return R_NilValue;
 } /*}}}*/
@@ -158,90 +158,90 @@ SEXP mmap_mkFlags (SEXP _flags) {
   int flags_bit = 0x0;
 
   for(i = 0; i < len_flags; i++) {
-    cur_string = (char *)CHAR(STRING_ELT(_flags,i));
+    cur_string = (char *)CHAR(STRING_ELT(_flags, i));
     // mprotect() and mmap() prot bits
-    if(strcmp(cur_string,"PROT_READ") == 0) {
+    if(strcmp(cur_string, "PROT_READ") == 0) {
       flags_bit = flags_bit | PROT_READ; continue;
-    } else if(strcmp(cur_string,"PROT_WRITE") == 0) {
+    } else if(strcmp(cur_string, "PROT_WRITE") == 0) {
       flags_bit = flags_bit | PROT_WRITE; continue;
-    } else if(strcmp(cur_string,"PROT_EXEC") == 0) {
+    } else if(strcmp(cur_string, "PROT_EXEC") == 0) {
       flags_bit = flags_bit | PROT_EXEC; continue;
-    } else if(strcmp(cur_string,"PROT_NONE") == 0) {
+    } else if(strcmp(cur_string, "PROT_NONE") == 0) {
       flags_bit = flags_bit | PROT_NONE; continue;
 
     // msync() flags bits
-    } else if(strcmp(cur_string,"MS_ASYNC") == 0) {
+    } else if(strcmp(cur_string, "MS_ASYNC") == 0) {
       flags_bit = flags_bit | MS_ASYNC; continue;
-    } else if(strcmp(cur_string,"MS_SYNC") == 0) {
+    } else if(strcmp(cur_string, "MS_SYNC") == 0) {
       flags_bit = flags_bit | MS_SYNC; continue;
 #ifndef WIN32
-    } else if(strcmp(cur_string,"MS_INVALIDATE") == 0) {
+    } else if(strcmp(cur_string, "MS_INVALIDATE") == 0) {
       flags_bit = flags_bit | MS_INVALIDATE; continue;
 #endif
 
     // mmap() flags bits
-    } else if(strcmp(cur_string,"MAP_SHARED") == 0) {
+    } else if(strcmp(cur_string, "MAP_SHARED") == 0) {
       flags_bit = flags_bit | MAP_SHARED; continue;
-    } else if(strcmp(cur_string,"MAP_PRIVATE") == 0) {
+    } else if(strcmp(cur_string, "MAP_PRIVATE") == 0) {
       flags_bit = flags_bit | MAP_PRIVATE; continue;
-    } else if(strcmp(cur_string,"MAP_ANONYMOUS") == 0) {
+    } else if(strcmp(cur_string, "MAP_ANONYMOUS") == 0) {
       flags_bit = flags_bit | MAP_ANONYMOUS; continue;
 #ifndef WIN32
-    } else if(strcmp(cur_string,"MAP_FIXED") == 0) {
+    } else if(strcmp(cur_string, "MAP_FIXED") == 0) {
       flags_bit = flags_bit | MAP_FIXED; continue;
-    } else if(strcmp(cur_string,"MAP_NORESERVE") == 0) {
+    } else if(strcmp(cur_string, "MAP_NORESERVE") == 0) {
       flags_bit = flags_bit | MAP_NORESERVE; continue;
 #endif
 
     // mmap()'s open()/shm_open() oflag bits; natively supported by MSVCRT too.
-    } else if(strcmp(cur_string,"O_RDONLY") == 0) {
+    } else if(strcmp(cur_string, "O_RDONLY") == 0) {
       flags_bit = flags_bit | O_RDONLY; continue;
-    } else if(strcmp(cur_string,"O_RDWR") == 0) {
+    } else if(strcmp(cur_string, "O_RDWR") == 0) {
       flags_bit = flags_bit | O_RDWR; continue;
-    } else if(strcmp(cur_string,"O_CREAT") == 0) {
+    } else if(strcmp(cur_string, "O_CREAT") == 0) {
       flags_bit = flags_bit | O_CREAT; continue;
-    } else if(strcmp(cur_string,"O_EXCL") == 0) {
+    } else if(strcmp(cur_string, "O_EXCL") == 0) {
       flags_bit = flags_bit | O_EXCL; continue;
-    } else if(strcmp(cur_string,"O_TRUNC") == 0) {
+    } else if(strcmp(cur_string, "O_TRUNC") == 0) {
       flags_bit = flags_bit | O_TRUNC; continue;
 
     // mmap()'s open()/shm_open() mode bits; partly supported by MSVCRT too.
-    } else if(strcmp(cur_string,"S_IRUSR") == 0) {
+    } else if(strcmp(cur_string, "S_IRUSR") == 0) {
       flags_bit = flags_bit | S_IRUSR; continue;
-    } else if(strcmp(cur_string,"S_IWUSR") == 0) {
+    } else if(strcmp(cur_string, "S_IWUSR") == 0) {
       flags_bit = flags_bit | S_IWUSR; continue;
-    } else if(strcmp(cur_string,"S_IXUSR") == 0) {
+    } else if(strcmp(cur_string, "S_IXUSR") == 0) {
       flags_bit = flags_bit | S_IXUSR; continue;
-    } else if(strcmp(cur_string,"S_IRWXU") == 0) {
+    } else if(strcmp(cur_string, "S_IRWXU") == 0) {
       flags_bit = flags_bit | S_IRWXU; continue;
-    } else if(strcmp(cur_string,"S_IRGRP") == 0) {
+    } else if(strcmp(cur_string, "S_IRGRP") == 0) {
       flags_bit = flags_bit | S_IRGRP; continue;
-    } else if(strcmp(cur_string,"S_IWGRP") == 0) {
+    } else if(strcmp(cur_string, "S_IWGRP") == 0) {
       flags_bit = flags_bit | S_IWGRP; continue;
-    } else if(strcmp(cur_string,"S_IXGRP") == 0) {
+    } else if(strcmp(cur_string, "S_IXGRP") == 0) {
       flags_bit = flags_bit | S_IXGRP; continue;
-    } else if(strcmp(cur_string,"S_IRWXG") == 0) {
+    } else if(strcmp(cur_string, "S_IRWXG") == 0) {
       flags_bit = flags_bit | S_IRWXG; continue;
-    } else if(strcmp(cur_string,"S_IROTH") == 0) {
+    } else if(strcmp(cur_string, "S_IROTH") == 0) {
       flags_bit = flags_bit | S_IROTH; continue;
-    } else if(strcmp(cur_string,"S_IWOTH") == 0) {
+    } else if(strcmp(cur_string, "S_IWOTH") == 0) {
       flags_bit = flags_bit | S_IWOTH; continue;
-    } else if(strcmp(cur_string,"S_IXOTH") == 0) {
+    } else if(strcmp(cur_string, "S_IXOTH") == 0) {
       flags_bit = flags_bit | S_IXOTH; continue;
-    } else if(strcmp(cur_string,"S_IRWXO") == 0) {
+    } else if(strcmp(cur_string, "S_IRWXO") == 0) {
       flags_bit = flags_bit | S_IRWXO; continue;
 
     // madvise() advice enum
-    } else if(strcmp(cur_string,"MADV_NORMAL") == 0) {
+    } else if(strcmp(cur_string, "MADV_NORMAL") == 0) {
       flags_bit = flags_bit | MADV_NORMAL; continue;
 #if defined(HAVE_MADVISE) || defined(WIN32)
-    } else if(strcmp(cur_string,"MADV_RANDOM") == 0) {
+    } else if(strcmp(cur_string, "MADV_RANDOM") == 0) {
       flags_bit = flags_bit | MADV_RANDOM; continue;
-    } else if(strcmp(cur_string,"MADV_SEQUENTIAL") == 0) {
+    } else if(strcmp(cur_string, "MADV_SEQUENTIAL") == 0) {
       flags_bit = flags_bit | MADV_SEQUENTIAL; continue;
-    } else if(strcmp(cur_string,"MADV_WILLNEED") == 0) {
+    } else if(strcmp(cur_string, "MADV_WILLNEED") == 0) {
       flags_bit = flags_bit | MADV_WILLNEED; continue;
-    } else if(strcmp(cur_string,"MADV_DONTNEED") == 0) {
+    } else if(strcmp(cur_string, "MADV_DONTNEED") == 0) {
       flags_bit = flags_bit | MADV_DONTNEED; continue;
 #endif
 
@@ -256,7 +256,7 @@ SEXP mmap_mkFlags (SEXP _flags) {
 #ifdef WIN32
 #define BUFSIZE 8192
 
-void rperror(const char *format) {
+static void rperror (const char *format) {
   // `Rf_error()` calls `longjmp()` to a location set further up the call stack
   //  and never returns here to where it was invoked. Since `errorText` must be
   //  valid when passed to `Rf_error()`, yet we cannot explicitly free it from
@@ -271,7 +271,7 @@ void rperror(const char *format) {
   error(format, errorText);
 }
 
-void rpwarning(const char *format) {
+static void rpwarning (const char *format) {
   LPTSTR errorText = NULL;
   
   HRESULT errnum = HRESULT_FROM_WIN32(GetLastError());
@@ -315,15 +315,15 @@ SEXP mmap_munmap (SEXP mmap_obj) {
   CloseHandle(mh);
   if(fd != INVALID_HANDLE_VALUE)
     CloseHandle(fd);
-  R_ClearExternalPtr(findVar(install("data"),mmap_obj));
+  R_ClearExternalPtr(findVar(install("data"), mmap_obj));
   return(ScalarLogical(success));
 }
 #else
-void rperror(const char *format) {
+static void rperror (const char *format) {
   error(format, strerror(errno));
 }
 
-void rpwarning(const char *format) {
+static void rpwarning (const char *format) {
   warning(format, strerror(errno));
 }
 
@@ -351,14 +351,15 @@ SEXP mmap_munmap (SEXP mmap_obj) {
   //  which is not removed by a subsequent close() on that file descriptor. This
   //  reference is removed when there are no more mappings to the file."
   close(fd);
-  R_ClearExternalPtr(findVar(install("data"),mmap_obj));
-  return(ScalarLogical(success)); 
-} /*}}}*/
+  R_ClearExternalPtr(findVar(install("data"), mmap_obj));
+  return(ScalarLogical(success));
+}
 #endif
+/*}}}*/
 
 /* mmap_mmap {{{ */
 #ifdef WIN32
-int get_acl_max_prot_and_acc (SECURITY_DESCRIPTOR *sec_des, GENERIC_MAPPING mapping, int oflag, DWORD *max_prot, DWORD *max_acc) {
+static int get_acl_max_prot_and_acc (SECURITY_DESCRIPTOR *sec_des, GENERIC_MAPPING mapping, int oflag, DWORD *max_prot, DWORD *max_acc) {
   HANDLE token = INVALID_HANDLE_VALUE;
   HANDLE imp_token = INVALID_HANDLE_VALUE;
   DWORD token_acc = TOKEN_IMPERSONATE | TOKEN_READ | TOKEN_DUPLICATE;
@@ -377,26 +378,20 @@ int get_acl_max_prot_and_acc (SECURITY_DESCRIPTOR *sec_des, GENERIC_MAPPING mapp
   if(!DuplicateToken(token, SecurityImpersonation, &imp_token))
     goto done;
   
-  // FILE_GENERIC_READ (FILE_READ_DATA, FILE_READ_EA, FILE_READ_ATTRIBUTES, STANDARD_RIGHTS_READ (READ_CONTROL), SYNCHRONIZE)
   des_acc = GENERIC_READ;
   MapGenericMask(&des_acc, &mapping);
   if(!AccessCheck(sec_des, imp_token, des_acc, &mapping, &priv_set, &priv_set_len, &granted_acc, &has_r_acc))
     goto done;
-  assert(!!has_r_acc == !!(granted_acc & FILE_READ_DATA));
   
-  // FILE_GENERIC_WRITE (FILE_WRITE_DATA, FILE_APPEND_DATA, FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES, STANDARD_RIGHTS_WRITE (READ_CONTROL), SYNCHRONIZE)
   des_acc = GENERIC_WRITE;
   MapGenericMask(&des_acc, &mapping);
   if(!AccessCheck(sec_des, imp_token, des_acc, &mapping, &priv_set, &priv_set_len, &granted_acc, &has_w_acc))
     goto done;
-  assert(!!has_w_acc == !!(granted_acc & FILE_WRITE_DATA));
   
-  // FILE_GENERIC_EXECUTE (FILE_EXECUTE, FILE_READ_ATTRIBUTES, STANDARD_RIGHTS_EXECUTE (READ_CONTROL), SYNCHRONIZE)
   des_acc = GENERIC_EXECUTE;
   MapGenericMask(&des_acc, &mapping);
   if(!AccessCheck(sec_des, imp_token, des_acc, &mapping, &priv_set, &priv_set_len, &granted_acc, &has_x_acc))
     goto done;
-  assert(!!has_x_acc == !!(granted_acc & FILE_EXECUTE));
   
   has_r_acc = !!(has_r_acc && ((oflag & O_RDWR) == O_RDWR || (oflag & O_RDONLY) == O_RDONLY));
   has_w_acc = !!(has_w_acc && ((oflag & O_RDWR) == O_RDWR || (oflag & O_WRONLY) == O_WRONLY));
@@ -434,7 +429,7 @@ done:
   return success;
 }
 
-int get_pmode_max_prot_and_acc (int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
+static int get_pmode_max_prot_and_acc (int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
   switch(pmode & (S_IRUSR | S_IWUSR | S_IXUSR)) {
   case S_IRUSR | S_IWUSR | S_IXUSR: // rwx
     *max_prot = PAGE_EXECUTE_READWRITE;
@@ -464,23 +459,15 @@ int get_pmode_max_prot_and_acc (int pmode, int oflag, DWORD *max_prot, DWORD *ma
   return 1;
 }
 
-int get_file_max_prot_and_acc (LPCTSTR file, int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
+static int get_file_max_prot_and_acc (LPCTSTR file, int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
   GENERIC_MAPPING mapping = { FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
   SECURITY_DESCRIPTOR *secDes = NULL;
-  DWORD secDesSz;
   int success = 0;
-  // Fetch the buffer size needed for TokenOwner by passing NULL and 0.
-  if(!GetFileSecurity(file, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, 0, &secDesSz) && GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+  if(GetNamedSecurityInfo((LPTSTR)file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, (void **)&secDes) != ERROR_SUCCESS) {
     if(GetLastError() == ERROR_FILE_NOT_FOUND)
       success = get_pmode_max_prot_and_acc(pmode, oflag, max_prot, max_acc);
     goto done;
   }
-  // Allocate the buffer on the heap.
-  if((secDes = (SECURITY_DESCRIPTOR *)LocalAlloc(LPTR, secDesSz)) == NULL)
-    goto done;
-  // Fill the buffer with the usrSID.
-  if(!GetFileSecurity(file, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, secDes, secDesSz, &secDesSz))
-    goto done;
   success = get_acl_max_prot_and_acc(secDes, mapping, oflag, max_prot, max_acc);
   
 done:
@@ -488,7 +475,7 @@ done:
   return success;
 }
 
-int get_share_max_prot_and_acc (LPCTSTR sharename, int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
+static int get_share_max_prot_and_acc (LPCTSTR sharename, int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
   GENERIC_MAPPING mapping = { FILE_MAP_READ, FILE_MAP_WRITE, FILE_MAP_EXECUTE, FILE_MAP_ALL_ACCESS };
   SECURITY_DESCRIPTOR *secDes = NULL;
   int success = 0;
@@ -505,7 +492,7 @@ done:
 }
 
 // open() mode bits -> ACL access permissions bits.
-DWORD translate_pmode_des_acc (int pmode, int r, int w, int x) {
+static DWORD translate_pmode_des_acc (int pmode, int r, int w, int x) {
   DWORD des_acc = 0;
   
   if(pmode & r)
@@ -529,7 +516,7 @@ struct sec_desc_refs {
   ACL *acl;
 };
 
-int translate_pmode_sec_attr (SECURITY_ATTRIBUTES *secAttr, SECURITY_DESCRIPTOR *secDesc, struct sec_desc_refs *refs, int pmode) {
+static int translate_pmode_sec_attr (SECURITY_ATTRIBUTES *secAttr, SECURITY_DESCRIPTOR *secDesc, struct sec_desc_refs *refs, int pmode) {
   refs->token = INVALID_HANDLE_VALUE;
   refs->tokUsr = NULL;
   refs->tokGrp = NULL;
@@ -615,7 +602,7 @@ done:
   return success;
 }
 
-void free_sec_desc (struct sec_desc_refs *refs) {
+static void free_sec_desc (struct sec_desc_refs *refs) {
   // NOTE: the resources must be deallocated in the same order as they are
   //  allocated in `translate_pmode_sec_attr()` so that we can early exit.
   // If CloseHandle(), LocalFree(), or FreeSid() fail, we don't care. Restore
@@ -649,7 +636,7 @@ done:
 }
 
 // open() oflag bits -> CreateFile() desired access bits.
-DWORD translate_oflag_des_acc (int oflag, DWORD max_acc) {
+static DWORD translate_oflag_des_acc (int oflag, DWORD max_acc) {
   // Not specifying exactly one of O_RDONLY or O_RDWR is unspecified behavior so
   //  don't bother checking that particular case.
   if((oflag & O_RDWR) == O_RDWR) {
@@ -667,7 +654,7 @@ DWORD translate_oflag_des_acc (int oflag, DWORD max_acc) {
 }
 
 // open() oflag bits -> CreateFile() creation disposition enum.
-DWORD translate_oflag_creat_disp (int oflag) {
+static DWORD translate_oflag_creat_disp (int oflag) {
   // O_EXCL without O_CREAT behaves as if neither was specified.
   switch(oflag & (O_CREAT | O_EXCL | O_TRUNC)) {
   default:
@@ -694,7 +681,7 @@ DWORD translate_oflag_creat_disp (int oflag) {
 
 // mmap() prot bits and flags bits -> MapViewOfFile() prot enum.
 // mprotect() prot bits -> VirtualProtect() prot enum.
-DWORD translate_prot_and_flags (int prot, int flags) {
+static DWORD translate_prot_and_flags (int prot, int flags) {
   if(prot & PROT_WRITE) {
     if(flags & MAP_SHARED) {
       if(prot & PROT_EXEC)
@@ -720,7 +707,7 @@ DWORD translate_prot_and_flags (int prot, int flags) {
 }
 
 // madvise() advice enum -> CreateFile() flag bits.
-DWORD translate_advice_cf (SEXP _advice) {
+static DWORD translate_advice_cf (SEXP _advice) {
   int *advice_p;
   R_len_t i, len = length(_advice);
   DWORD cf_advice = 0;
@@ -904,15 +891,15 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _sharename, SEXP _prot,
   SET_ENCLOS(mmap_obj, R_NilValue);
   SET_HASHTAB(mmap_obj, R_NilValue);
   SET_ATTRIB(mmap_obj, R_NilValue);
-  defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue),mmap_obj);
-  defineVar(install("pageoff"), _pageoff,mmap_obj);
-  defineVar(install("bytes"), _len,mmap_obj);
-  defineVar(install("filedesc"), ScalarInteger((int)(intptr_t)hFile),mmap_obj);
-  defineVar(install("storage.mode"), _type,mmap_obj);
-  defineVar(install("handle"), ScalarInteger((int)(intptr_t)hMap),mmap_obj);
-  defineVar(install("flags"), _flags,mmap_obj);
-  defineVar(install("dim"), R_NilValue ,mmap_obj);
-  UNPROTECT(1);
+  defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue), mmap_obj);
+  defineVar(install("pageoff"), _pageoff, mmap_obj);
+  defineVar(install("bytes"), _len, mmap_obj);
+  defineVar(install("filedesc"), PROTECT(ScalarInteger((int)(intptr_t)hFile)), mmap_obj);
+  defineVar(install("storage.mode"), _type, mmap_obj);
+  defineVar(install("handle"), PROTECT(ScalarInteger((int)(intptr_t)hMap)), mmap_obj);
+  defineVar(install("flags"), _flags, mmap_obj);
+  defineVar(install("dim"), R_NilValue, mmap_obj);
+  UNPROTECT(3);
   return(mmap_obj);
 }
 #else
@@ -955,11 +942,11 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _sharename, SEXP _prot,
         rperror("unable to mmap file: %s");
   }
   
-  data = mmap((caddr_t)0, 
-              (size_t)(asReal(_len) + asInteger(_pageoff)), 
-              asInteger(_prot), 
-              asInteger(_flags), 
-              fd, 
+  data = mmap((caddr_t)0,
+              (size_t)(asReal(_len) + asInteger(_pageoff)),
+              asInteger(_prot),
+              asInteger(_flags),
+              fd,
               (off_t)asReal(_off));
   if(data == MAP_FAILED) {
     close(fd);
@@ -974,34 +961,35 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _sharename, SEXP _prot,
   SET_ENCLOS(mmap_obj, R_NilValue);
   SET_HASHTAB(mmap_obj, R_NilValue);
   SET_ATTRIB(mmap_obj, R_NilValue);
-  defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue),mmap_obj);
-  defineVar(install("pageoff"), _pageoff,mmap_obj);
-  defineVar(install("bytes"), _len,mmap_obj);
-  defineVar(install("filedesc"), ScalarInteger(fd),mmap_obj);
-  defineVar(install("storage.mode"), _type,mmap_obj);
-  defineVar(install("dim"), R_NilValue ,mmap_obj);
+  defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue), mmap_obj);
+  defineVar(install("pageoff"), _pageoff, mmap_obj);
+  defineVar(install("bytes"), _len, mmap_obj);
+  defineVar(install("filedesc"), PROTECT(ScalarInteger(fd)), mmap_obj);
+  defineVar(install("storage.mode"), _type, mmap_obj);
+  defineVar(install("dim"), R_NilValue, mmap_obj);
   
   mmap_madvise(mmap_obj, R_NilValue, _advice);
-  UNPROTECT(1);
+  UNPROTECT(2);
   return(mmap_obj);
-} /*}}}*/
+}
 #endif
+/*}}}*/
 
 /* mmap_pagesize {{{ */
 #ifdef WIN32
-SEXP mmap_pagesize () {
+SEXP mmap_pagesize (void) {
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
   return ScalarInteger((int)sSysInfo.dwPageSize);
 }
 
-SEXP mmap_allocation_granularity () {
+SEXP mmap_allocation_granularity (void) {
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
   return ScalarInteger((int)sSysInfo.dwAllocationGranularity);
 }
 
-SEXP mmap_get_memlock_resource_limit () {
+SEXP mmap_get_memlock_resource_limit (void) {
   SIZE_T min_rss, max_rss;
   if(!GetProcessWorkingSetSize(GetCurrentProcess(), &min_rss, &max_rss))
     rperror("unable to query RLIMIT_MEMLOCK: %s");
@@ -1021,15 +1009,15 @@ SEXP mmap_set_memlock_resource_limit (SEXP min_rss) {
   return R_NilValue;
 }
 #else
-SEXP mmap_pagesize () {
+SEXP mmap_pagesize (void) {
   return ScalarInteger((int)sysconf(_SC_PAGE_SIZE));
 }
 
-SEXP mmap_allocation_granularity () {
+SEXP mmap_allocation_granularity (void) {
   return mmap_pagesize();
 }
 
-SEXP mmap_get_memlock_resource_limit () {
+SEXP mmap_get_memlock_resource_limit (void) {
 #ifdef RLIMIT_MEMLOCK
   struct rlimit rlim;
   if(!!getrlimit(RLIMIT_MEMLOCK, &rlim))
@@ -1079,8 +1067,8 @@ SEXP mmap_is_mmapped (SEXP mmap_obj) {
   return(ScalarLogical(MMAP_DATA(mmap_obj) != NULL));
 } /*}}}*/
 
+/* mmap_msync {{{ */
 #ifdef WIN32
-/* {{{ mmap_msync */
 SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
   unsigned char *data;
   data = MMAP_DATA(mmap_obj);
@@ -1125,10 +1113,12 @@ SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
   if(!success)
     rpwarning("unable to msync file: %s");
   return ScalarLogical(success);
-}/*}}}*/
+}
 #endif
+/*}}}*/
 
-ptrdiff_t inline align_down(ptrdiff_t idx, ptrdiff_t pageoff, ptrdiff_t pagesize) {
+/* mmap_madvise {{{ */
+static inline ptrdiff_t align_down (ptrdiff_t idx, ptrdiff_t pageoff, ptrdiff_t pagesize) {
   // If pagesize is a power of 2, the bit twiddling hack rounds down
   //  `idx + pageoff` to the nearest multiple of pagesize without any
   //  division operations, i.e. equivalently:
@@ -1143,11 +1133,10 @@ ptrdiff_t inline align_down(ptrdiff_t idx, ptrdiff_t pageoff, ptrdiff_t pagesize
   return ((idx + pageoff) & ~(pagesize - 1)) - pageoff;
 }
 
-ptrdiff_t inline align_up(ptrdiff_t idx, ptrdiff_t pageoff, ptrdiff_t pagesize) {
+static inline ptrdiff_t align_up (ptrdiff_t idx, ptrdiff_t pageoff, ptrdiff_t pagesize) {
   return align_down(idx + (pagesize - 1), pageoff, pagesize);
 }
 
-/* {{{ mmap_madvise */
 #ifdef WIN32
 SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
   R_xlen_t i, LEN;
@@ -1308,8 +1297,9 @@ SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
   return success;
 }
 #endif
+/*}}}*/
 
-/* {{{ mmap_mprotect */
+/* mmap_mprotect {{{ */
 SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP _prot) {
   R_xlen_t i, LEN;
   R_xlen_t u, mmap_len, Cbytes;
@@ -1478,7 +1468,8 @@ SEXP mmap_munlock (SEXP mmap_obj, SEXP index) {
   return success;
 }/*}}}*/
 
-void logical_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+/* mmap_extract {{{ */
+static void logical_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
   R_xlen_t i, u;
   int *lgl_dat;
   int8_t bytebuf;
@@ -1537,7 +1528,7 @@ void logical_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_
   }
 }
 
-void integer_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+static void integer_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
   R_xlen_t i, u;
   int *int_dat;
   int8_t bytebuf;
@@ -1623,7 +1614,7 @@ void integer_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_
   }
 }
 
-void double_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+static void double_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
   R_xlen_t i, u;
   double *real_dat;
   int64_t longbuf;
@@ -1682,7 +1673,7 @@ void double_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p
   }
 }
 
-void complex_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, int swap) {
+static void complex_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, int swap) {
   R_xlen_t i, u;
   Rcomplex *complex_dat;
   double doublepairbuf[2];
@@ -1716,7 +1707,7 @@ void complex_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_
   }
 }
 
-void character_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode) {
+static void character_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode) {
   R_xlen_t i, u, fieldCbytes;
   char *str;
   
@@ -1748,7 +1739,7 @@ void character_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *inde
   }
 }
 
-void raw_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset) {
+static void raw_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset) {
   R_xlen_t i, u;
   Rbyte *raw_dat;
 
@@ -1762,9 +1753,7 @@ void raw_extract(unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R
   }
 }
 
-/* {{{ mmap_extract */
 SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_byte_order) {
-/*SEXP mmap_extract (SEXP index, SEXP field, SEXP mmap_obj) {*/
   R_xlen_t v, fi;
   int P = 0;
   unsigned char *data;
@@ -1870,7 +1859,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
   return dat;
 }/*}}}*/
 
-void logical_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+/* mmap_replace {{{ */
+static void logical_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
   R_xlen_t i, u;
   int *lgl_value;
   int32_t intbuf;
@@ -1954,7 +1944,7 @@ void logical_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *inde
   }
 }
 
-void integer_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+static void integer_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
   R_xlen_t i, u;
   int *int_value;
   int16_t sbuf;
@@ -2065,7 +2055,7 @@ void integer_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *inde
   }
 }
 
-void double_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+static void double_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
   R_xlen_t i, u;
   double *real_value;
   int64_t longbuf;
@@ -2141,7 +2131,7 @@ void double_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index
   }
 }
 
-void complex_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, int swap) {
+static void complex_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, int swap) {
   R_xlen_t i, u;
   Rcomplex *complex_value;
   double doublepairbuf[2];
@@ -2164,7 +2154,7 @@ void complex_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *inde
   }
 }
 
-void character_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode) {
+static void character_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode) {
   R_xlen_t i, u, fieldCbytes;
   R_len_t charsxp_len;
   int hasnul;
@@ -2180,20 +2170,20 @@ void character_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *in
     // strnlen(CHAR(STRING_ELT(value, i)), fieldCbytes) is definitely O(n).
     // I'm hoping that R internally stores the length of strings
     //  so that length(CHARSXP) is O(1).
-    charsxp_len = length(STRING_ELT(value,i));
+    charsxp_len = length(STRING_ELT(value, i));
     if(STRING_ELT(value, i) == NA_STRING) {
       // Strings that start with { 0x00, 0xff } represent NA.
       data[u * record_size + offset + 1] = 0xff;
     } else if(charsxp_len > fieldCbytes - hasnul) {
       warning("Long strings were truncated");
-      memcpy(&data[u * record_size + offset], CHAR(STRING_ELT(value,i)), fieldCbytes - hasnul);
+      memcpy(&data[u * record_size + offset], CHAR(STRING_ELT(value, i)), fieldCbytes - hasnul);
     } else {
-      memcpy(&data[u * record_size + offset], CHAR(STRING_ELT(value,i)), charsxp_len);
+      memcpy(&data[u * record_size + offset], CHAR(STRING_ELT(value, i)), charsxp_len);
     }
   }
 }
 
-void raw_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset) {
+static void raw_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset) {
   R_xlen_t i, u;
   Rbyte *raw_value;
   
@@ -2207,7 +2197,6 @@ void raw_replace(unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p,
   }
 }
 
-/* mmap_replace {{{ */
 SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_byte_order) {
   R_xlen_t v, fi, offset;
   unsigned char *data;
@@ -2225,7 +2214,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
 
   if(mode != VECSXP) {
     PROTECT(value = coerceVector(value, mode)); P++;
-    if (xlength(value) != LEN)
+    if(xlength(value) != LEN)
       // Code on R side failed to properly handle the recycling.
       error("size of struct and size of replacement value do not match");
   }
@@ -2260,7 +2249,7 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
       offset = SMODE_OFFSET(smode, v);
       vec_smode = VECTOR_ELT(smode, v);
       vec_value = VECTOR_ELT(value, fi);
-      if (xlength(vec_value) != LEN)
+      if(xlength(vec_value) != LEN)
         // Code on R side failed to properly handle the recycling.
         error("size of struct and size of replacement value do not match");
       switch(TYPEOF(vec_smode)) {
@@ -2308,10 +2297,10 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
   return R_NilValue;
 } /*}}}*/
 
-/* {{{ mmap_compare */
+/* mmap_compare {{{ */
 SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
-  int i;
-  char *data;
+  R_xlen_t i;
+  unsigned char *data;
 
   unsigned char charbuf;
   int intbuf;
@@ -2319,13 +2308,13 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
   float floatbuf;
   double realbuf;
 
-  long LEN;
-  int mode = TYPEOF(MMAP_SMODE(mmap_obj)); 
-  int Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  R_xlen_t LEN;
+  SEXPTYPE mode = TYPEOF(MMAP_SMODE(mmap_obj));
+  R_xlen_t Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
   int isSigned = SMODE_SIGNED(MMAP_SMODE(mmap_obj));
 
   SEXP result;
-  LEN = (long)(MMAP_SIZE(mmap_obj)/Cbytes);  /* change to REAL */
+  LEN = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
   PROTECT(result = allocVector(INTSXP, LEN));
   int *int_result = INTEGER(result);
 
@@ -2336,7 +2325,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
      4  <=
      5  >
      6  < */
-  int cmp_how = INTEGER(compare_how)[0];
+  int cmp_how = asInteger(compare_how);
 
   //int *int_dat;
   //double *real_dat;
@@ -2353,7 +2342,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
 
   switch(mode) {
   case LGLSXP:
-    cmp_to_int = INTEGER(coerceVector(compare_to,INTSXP))[0];
+    cmp_to_int = asInteger(compare_to);
     /* bitset, bool8, bool32 */
     switch(Cbytes) {
       case sizeof(char):
@@ -2404,14 +2393,14 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
         if(cmp_how==1) {
           for(i=0;  i < LEN; i++) {
             memcpy(&intbuf, &(data[i * sizeof(int)]), sizeof(char) * sizeof(int));
-            if(cmp_to_int == intbuf) 
+            if(cmp_to_int == intbuf)
               int_result[hits++] = i+1;
           }
         } else
         if(cmp_how==2) {
           for(i=0;  i < LEN; i++) {
             memcpy(&intbuf, &(data[i * sizeof(int)]), sizeof(char) * sizeof(int));
-            if(cmp_to_int != intbuf) 
+            if(cmp_to_int != intbuf)
               int_result[hits++] = i+1;
           }
         } else
@@ -2450,9 +2439,9 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     }
     break;
   case INTSXP:
-    cmp_to_int = INTEGER(coerceVector(compare_to,INTSXP))[0];
+    cmp_to_int = asInteger(compare_to);
     /* needs to branch for
-        uint8, int8, uint16, int16, uint24, int24, int32 
+        uint8, int8, uint16, int16, uint24, int24, int32
         FIXME int64 (in REALSXP branch)
     */
     switch(Cbytes) {
@@ -2551,7 +2540,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
         cmp_to_int = (short)cmp_to_int;
         for(i=0;  i < LEN; i++) {
           memcpy(&shortbuf, &(data[i * sizeof(short)]),sizeof(short));
-          //if(cmp_to_int == (int)(short)*(short *)(short_buf)) 
+          //if(cmp_to_int == (int)(short)*(short *)(short_buf))
           if(cmp_to_int == shortbuf)
             int_result[hits++] = i+1;
         }
@@ -2640,15 +2629,15 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
       if(cmp_how==1) {
         for(i=0;  i < LEN; i++) {
           memcpy(&intbuf, &(data[i * sizeof(int)]), sizeof(char) * sizeof(int));
-          //if(cmp_to_int == *((int *)(void *)&int_buf)) 
-          if(cmp_to_int == intbuf) 
+          //if(cmp_to_int == *((int *)(void *)&int_buf))
+          if(cmp_to_int == intbuf)
             int_result[hits++] = i+1;
         }
       } else
       if(cmp_how==2) {
         for(i=0;  i < LEN; i++) {
           memcpy(&intbuf, &(data[i * sizeof(int)]), sizeof(char) * sizeof(int));
-          if(cmp_to_int != intbuf) //*((int *)(void *)&int_buf)) 
+          if(cmp_to_int != intbuf) //*((int *)(void *)&int_buf))
             int_result[hits++] = i+1;
         }
       } else
@@ -2686,11 +2675,11 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     }
     break;
   case REALSXP:
-    /* NA handling is missing .. how is this to behave? 
+    /* NA handling is missing .. how is this to behave?
        Likely should test for compare_to as well as on-disk
        values.
     */
-    cmp_to_real = REAL(coerceVector(compare_to,REALSXP))[0];
+    cmp_to_real = asReal(compare_to);
     switch(Cbytes) {
     case sizeof(float):
       if(cmp_how==1) {
@@ -2792,7 +2781,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     break;
   case RAWSXP:
     for(i=0;  i < LEN; i++) {
-      warning("unimplemented raw comparisons"); 
+      warning("unimplemented raw comparisons");
     }
     break;
   case STRSXP: /* {{{ */
@@ -2800,9 +2789,9 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     /* fixed width character support */
     /*
     if(length(compare_to) > isNull(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))) ? Cbytes-1 : Cbytes) {
-      if(isNull(getAttrib(compare_how, install("partial")))) { 
+      if(isNull(getAttrib(compare_how, install("partial")))) {
         UNPROTECT(1); return allocVector(INTSXP,0);
-      }  
+      }
       warning("only first %i characters of string compared", Cbytes-1);
     }
     */
@@ -2814,7 +2803,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     int hasnul = !!SMODE_NUL_TERM(MMAP_SMODE(mmap_obj));
     if(hasnul) {
       for(i=0; i < LEN; i++) {
-        str = &(data[i*Cbytes]);
+        str = (char *)&(data[i*Cbytes]);
         //strncpy(str_buf, str, Cbytes);
         //str_len = strlen(str_buf);
         //str_len = (str_len > Cbytes) ? Cbytes : str_len;
@@ -2825,7 +2814,6 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
           int_result[hits++] = i+1;
       }
 //      for(i=0; i < LEN; i++) {
-//          //for(b=0; b < Cbytes-1; b++) {
 //          for(b=0; b < cmp_len; b++) {
 //            Rprintf("%c == %c,", cmp_to_raw[b], data[i*Cbytes+b]);
 //            if(cmp_to_raw[b] != data[i*Cbytes + b])
@@ -2837,7 +2825,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
 //      }
     } else {
       for(i=0; i < LEN; i++) {
-        str = &(data[i*Cbytes]);
+        str = (char *)&(data[i*Cbytes]);
         strncpy(str_buf, str, Cbytes);
         str_len = strlen(str_buf);
         str_len = (str_len > Cbytes) ? Cbytes : str_len;
@@ -2860,28 +2848,31 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
   return ScalarInteger(hits);
 }/*}}}*/
 
-SEXP convert_ij_to_i (SEXP rows, SEXP i, SEXP j) {
+/* mmap_convert_ij_to_i {{{ */
+SEXP mmap_convert_ij_to_i (SEXP rows, SEXP i, SEXP j) {
   /* utility to take i,j subsets for matrix objects and
      convert to subset column-major array in memory */
-  long n=0, jj, ii, lenj=length(j), leni=length(i);
-  //int _rows = INTEGER(rows)[0];
-  long _rows = ((long)REAL(rows)[0]);
+  R_xlen_t n = 0, jj, ii, lenj = length(j), leni = length(i);
+  //int _rows = asInteger(rows);
+  R_xlen_t _rows = ((R_xlen_t)asReal(rows));
 
   SEXP newi;
-  int *_j, *_i, *_newi;
+  double *_j, *_i, *_newi;
 
-  _j = INTEGER(j);
-  _i = INTEGER(i);
+  PROTECT(i = coerceVector(i, REALSXP));
+  PROTECT(j = coerceVector(j, REALSXP));
+  _j = REAL(j);
+  _i = REAL(i);
 
-  PROTECT( newi = allocVector(INTSXP, leni * lenj));
-  _newi = INTEGER(newi); 
+  PROTECT(newi = allocVector(REALSXP, leni * lenj));
+  _newi = REAL(newi);
 
-  for(jj=0; jj<lenj; jj++) {
-    for(ii=0; ii<leni; ii++) {
+  for(jj = 0; jj < lenj; jj++) {
+    for(ii = 0; ii < leni; ii++) {
       _newi[n++] = (_j[jj] - 1) * _rows + _i[ii];
     }
   }
 
-  UNPROTECT(1);
+  UNPROTECT(3);
   return newi;
-}
+}/*}}}*/

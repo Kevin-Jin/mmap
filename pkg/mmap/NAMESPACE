@@ -1,5 +1,7 @@
 useDynLib(mmap)
 
+importFrom("utils", "head", "read.table", "str")
+
 # user functions
 export(
        mmap,
@@ -41,9 +43,6 @@ export(
        is.Ctype,
        get.Ctype,
 
-       dim.mmap, "dim<-.mmap",
-       dimnames.mmap, "dimnames<-.mmap",
-       is.array.mmap,
        sizeof,
 
        mmap.csv
@@ -66,6 +65,11 @@ S3method(str,mmap)
 S3method(print,mmap)
 S3method(length, mmap)
 S3method('length<-', mmap)
+S3method(dim, mmap)
+S3method('dim<-', mmap)
+S3method(dimnames, mmap)
+S3method('dimnames<-', mmap)
+S3method(is.array, mmap)
 
 S3method(as.mmap, raw)
 S3method(as.mmap, complex)

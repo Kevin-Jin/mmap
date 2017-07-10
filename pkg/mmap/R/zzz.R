@@ -1,3 +1,3 @@
 .onLoad <- function(lib, pkg) {
-  .Call("make_bitmask")
+  .Call("mmap_init_globals")
 }
