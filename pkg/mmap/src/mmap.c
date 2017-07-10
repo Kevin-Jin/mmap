@@ -11,6 +11,7 @@
 #ifndef WIN32
 #ifdef HAVE_MMAP
 #  include <sys/mman.h>
+#  include <sys/resource.h>
 #endif
 #ifndef HAVE_STRNLEN
 size_t strnlen(const char *str, size_t max) {
@@ -999,6 +1000,26 @@ SEXP mmap_allocation_granularity () {
   GetSystemInfo(&sSysInfo);
   return ScalarInteger((int)sSysInfo.dwAllocationGranularity);
 }
+
+SEXP mmap_get_memlock_resource_limit () {
+  SIZE_T min_rss, max_rss;
+  if(!GetProcessWorkingSetSize(GetCurrentProcess(), &min_rss, &max_rss))
+    rperror("unable to query RLIMIT_MEMLOCK: %s");
+  
+  SEXP res = PROTECT(ScalarReal(min_rss));
+  setAttrib(res, install("max_rss"), PROTECT(ScalarReal(max_rss)));
+  UNPROTECT(2);
+  return res;
+}
+
+SEXP mmap_set_memlock_resource_limit (SEXP min_rss) {
+  SEXP max_rss = getAttrib(min_rss, install("max_rss"));
+  if(xlength(max_rss) == 0)
+    max_rss = min_rss;
+  if(!SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)asReal(min_rss), (SIZE_T)asReal(max_rss)))
+    rperror("unable to update RLIMIT_MEMLOCK: %s");
+  return R_NilValue;
+}
 #else
 SEXP mmap_pagesize () {
   return ScalarInteger((int)sysconf(_SC_PAGE_SIZE));
@@ -1006,6 +1027,49 @@ SEXP mmap_pagesize () {
 
 SEXP mmap_allocation_granularity () {
   return mmap_pagesize();
+}
+
+SEXP mmap_get_memlock_resource_limit () {
+#ifdef RLIMIT_MEMLOCK
+  struct rlimit rlim;
+  if(!!getrlimit(RLIMIT_MEMLOCK, &rlim))
+    rperror("unable to query RLIMIT_MEMLOCK: %s");
+  SEXP res;
+  if(rlim.rlim_cur == RLIM_INFINITY)
+    PROTECT(res = ScalarReal(INFINITY));
+  else
+    PROTECT(res = ScalarReal(rlim.rlim_cur));
+  if(rlim.rlim_max == RLIM_INFINITY)
+    setAttrib(res, install("rlim_max"), PROTECT(ScalarReal(INFINITY)));
+  else
+    setAttrib(res, install("rlim_max"), PROTECT(ScalarReal(rlim.rlim_max)));
+  UNPROTECT(2);
+  return res;
+#endif
+  return ScalarReal(INFINITY);
+}
+
+SEXP mmap_set_memlock_resource_limit (SEXP rlim_cur) {
+#ifdef RLIMIT_MEMLOCK
+  struct rlimit rlim;
+  SEXP rlim_max = getAttrib(rlim_cur, install("rlim_max"));
+  if(xlength(rlim_max) == 0) {
+    if(!!getrlimit(RLIMIT_MEMLOCK, &rlim))
+      rperror("unable to update RLIMIT_MEMLOCK: %s");
+  } else {
+    if(asReal(rlim_max) == INFINITY)
+      rlim.rlim_max = RLIM_INFINITY;
+    else
+      rlim.rlim_max = (rlim_t)asReal(rlim_max);
+  }
+  if(asReal(rlim_cur) == INFINITY)
+    rlim.rlim_cur = RLIM_INFINITY;
+  else
+    rlim.rlim_cur = (rlim_t)asReal(rlim_cur);
+  if(!!setrlimit(RLIMIT_MEMLOCK, &rlim))
+    rperror("unable to update RLIMIT_MEMLOCK: %s");
+#endif
+  return R_NilValue;
 }
 #endif
 /*}}}*/
@@ -1298,6 +1362,116 @@ SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP _prot) {
 #endif
     if(!LOGICAL(success)[i])
       rpwarning("unable to mprotect file: %s");
+  }
+  
+  UNPROTECT(2);
+  return success;
+}/*}}}*/
+
+/* mmap_mlock {{{ */
+SEXP mmap_mlock (SEXP mmap_obj, SEXP index) {
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
+  unsigned char *data;
+  
+#ifndef WIN32
+  R_xlen_t aligned;
+  R_xlen_t pagesize = asInteger(mmap_pagesize());
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
+#endif
+  
+  data = MMAP_DATA(mmap_obj);
+  LEN = xlength(index);
+
+  SEXP success;
+  
+  if(LEN == 0) {
+#ifndef WIN32
+    if(!mlock((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff)))
+      return ScalarLogical(1);
+#else
+    if(VirtualLock(data, (SIZE_T)MMAP_SIZE(mmap_obj)))
+      return ScalarLogical(1);
+#endif
+    rpwarning("unable to mlock file: %s");
+    return ScalarLogical(0);
+  }
+  
+  PROTECT(success = allocVector(LGLSXP, LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  for(i = 0; i < LEN; i++) {
+    u = (R_xlen_t)index_p[i] - 1;
+    if(u >= mmap_len || u < 0)
+      error("'i=%i' out of bounds", u + 1);
+    
+#ifndef WIN32
+    // "The implementation may require that addr be a multiple of {PAGESIZE}."
+    aligned = align_down(u * Cbytes, pageoff, pagesize);
+    LOGICAL(success)[i] = !mlock(&data[aligned], (size_t)((u + 1) * Cbytes - aligned));
+#else
+    LOGICAL(success)[i] = !!VirtualLock(&data[u * Cbytes], (SIZE_T)Cbytes);
+#endif
+    if(!LOGICAL(success)[i])
+      rpwarning("unable to mlock file: %s");
+  }
+  
+  UNPROTECT(2);
+  return success;
+}/*}}}*/
+
+/* mmap_munlock {{{ */
+SEXP mmap_munlock (SEXP mmap_obj, SEXP index) {
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
+  unsigned char *data;
+  
+#ifndef WIN32
+  R_xlen_t aligned;
+  R_xlen_t pagesize = asInteger(mmap_pagesize());
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
+#endif
+  
+  data = MMAP_DATA(mmap_obj);
+  LEN = xlength(index);
+
+  SEXP success;
+  
+  if(LEN == 0) {
+#ifndef WIN32
+    if(!munlock((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff)))
+      return ScalarLogical(1);
+#else
+    if(VirtualUnlock(data, (SIZE_T)MMAP_SIZE(mmap_obj)))
+      return ScalarLogical(1);
+#endif
+    rpwarning("unable to munlock file: %s");
+    return ScalarLogical(0);
+  }
+  
+  PROTECT(success = allocVector(LGLSXP, LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  for(i = 0; i < LEN; i++) {
+    u = (R_xlen_t)index_p[i] - 1;
+    if(u >= mmap_len || u < 0)
+      error("'i=%i' out of bounds", u + 1);
+    
+#ifndef WIN32
+    // "The implementation may require that addr be a multiple of {PAGESIZE}."
+    aligned = align_down(u * Cbytes, pageoff, pagesize);
+    LOGICAL(success)[i] = !munlock(&data[aligned], (size_t)((u + 1) * Cbytes - aligned));
+#else
+    LOGICAL(success)[i] = !!VirtualUnlock(&data[u * Cbytes], (SIZE_T)Cbytes);
+#endif
+    if(!LOGICAL(success)[i])
+      rpwarning("unable to munlock file: %s");
   }
   
   UNPROTECT(2);

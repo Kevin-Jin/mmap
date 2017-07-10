@@ -198,6 +198,18 @@ mprotect <- function(x, i = NULL, prot) {
   .Call("mmap_mprotect", x, i, as.integer(prot), PKG="mmap")
 }
 
+mlock <- function(x, i = NULL) {
+  if(!is.mmap(x))
+    stop("mmap object required to mlock")
+  .Call("mmap_mlock", x, i, PKG="mmap")
+}
+
+munlock <- function(x, i = NULL) {
+  if(!is.mmap(x))
+    stop("mmap object required to munlock")
+  .Call("mmap_munlock", x, i, PKG="mmap")
+}
+
 is.mmap <- function(x) {
   inherits(x, "mmap") && .Call("mmap_is_mmapped",x,PKG="mmap")
 }
@@ -538,4 +550,12 @@ pagesize <- function() {
 
 allocation.granularity <- function() {
   .Call("mmap_allocation_granularity")
+}
+
+get.mlock.lim <- function() {
+  .Call("mmap_get_memlock_resource_limit")
+}
+
+set.mlock.lim <- function(new.lim) {
+  invisible(.Call("mmap_set_memlock_resource_limit", new.lim))
 }

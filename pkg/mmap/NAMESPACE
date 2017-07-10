@@ -7,9 +7,13 @@ export(
        msync,
        madvise,
        mprotect,
+       mlock,
+       munlock,
        
        mmapFlags,
        pagesize,
+       get.mlock.lim,
+       set.mlock.lim,
 
        is.mmap,
        as.mmap,
