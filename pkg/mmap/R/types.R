@@ -1,9 +1,3 @@
-# C_types
-sizeofCtypes <- function() {
-  structure(.Call("sizeof_Ctypes"), 
-            .Names=c("char","short","int","long","float","double"))
-}
-
 as.Ctype <- function(x, ...) {
   UseMethod("as.Ctype")
 }
@@ -16,7 +10,7 @@ as.Ctype.integer <- function(x, ...) {
   int32(...)
 }
 as.Ctype.double <- function(x, ...) {
-  if( isTRUE(attr(x, "Csingle")))
+  if(isTRUE(attr(x, "Csingle")))
     real32(...)
   else
     real64(...)
@@ -43,23 +37,23 @@ get.Ctype.Ctype <- function(x, ...) class(x)[1]
 
 normalize.endianness <- function(endian)
   switch(endian, big="big", little="little", platform=.Platform$endian,
-         swap=if (.Platform$endian == "little") "big" else "little")
+         swap=if(.Platform$endian == "little") "big" else "little")
 
 string <- function(length=NULL, enc=NULL, nul=TRUE, sample=NULL) {
-  if (length(sample) > 0) {
-    if (is.null(enc)) {
+  if(length(sample) > 0) {
+    if(is.null(enc)) {
       enc <- unique(Encoding(sample))
       enc <- enc[enc != "unknown"]
-      if (length(enc) == 0)
+      if(length(enc) == 0)
         # If none of the strings in the sample have codepoints above 0x7F,
         #  then assign a single-byte encoding.
         enc <- "latin1"
-      else if (length(enc) > 1)
+      else if(length(enc) > 1)
         # If the sample mixes multiple encodings (probably UTF-8 and latin1),
         #  then assign "UTF-8" so that all characters can be represented.
         enc <- "UTF-8"
     }
-    if (is.null(length)) {
+    if(is.null(length)) {
       # Without this step, the number of bytes each string takes up
       #  can be understated e.g. we reencode latin1 strings containing
       #  codepoints above 0x7F as UTF-8.
@@ -67,10 +61,12 @@ string <- function(length=NULL, enc=NULL, nul=TRUE, sample=NULL) {
       length <- max(nchar(sample[!is.na(sample)], type = "bytes"))
     }
   } else {
-    enc <- "latin1"
-    length <- 0
+    if(is.null(enc))
+      enc <- "latin1"
+    if(is.null(length))
+      length <- 0
   }
-  structure(character(0), bytes=as.integer(max(length,1)+!!nul),
+  structure(character(0), bytes=max(length, 1) + !!nul,
             enc=enc, nul=nul, class=c("string","Ctype"))
 }
 as.string <- function(x, ...) UseMethod("as.string")
@@ -85,7 +81,7 @@ char <- function() {
 as.char <- function(x, ...) UseMethod("as.char")
 as.char.mmap <- function(x, ...) {
   x$storage.mode <- char(...)
-  x 
+  x
 }
 
 uchar <- function() {
@@ -94,7 +90,7 @@ uchar <- function() {
 as.uchar <- function(x, ...) UseMethod("as.uchar")
 as.uchar.mmap <- function(x, ...) {
   x$storage.mode <- uchar(...)
-  x 
+  x
 }
 
 int8 <- function() {
@@ -154,12 +150,12 @@ int64 <- function(endian=c("big", "little", "swap", "platform")) {
   structure(double(0), bytes=as.integer(.Machine$sizeof.long), signed=1L, endian=endian, class=c("int64","Ctype"))
 }
 
-real32 <- function(endian=c("big", "little", "swap", "platform")) { 
+real32 <- function(endian=c("big", "little", "swap", "platform")) {
   endian <- normalize.endianness(match.arg(endian))
   structure(double(0), bytes=4L, endian=endian, class=c("real32","Ctype"))
 }
 
-real64 <- function(endian=c("big", "little", "swap", "platform")) { 
+real64 <- function(endian=c("big", "little", "swap", "platform")) {
   endian <- normalize.endianness(match.arg(endian))
   structure(double(0), bytes=8L, endian=endian, class=c("real64","Ctype"))
 }
@@ -188,27 +184,26 @@ pad <- function(...) {
 }
 
 pad.default <- function(length=0L, ...) {
-  structure(NA_integer_, bytes=as.integer(length), class=c("pad","Ctype"))
+  structure(NA_integer_, bytes=length, class=c("pad","Ctype"))
 }
 
 pad.Ctype <- function(ctype, ...) {
   pad(sizeof(ctype))
 }
 
-struct <- function (..., bytes, offset) {
-    dots <- lapply(list(...), as.Ctype)
-    bytes_ <- sapply(dots, sizeof)
-    if (missing(offset)) 
-      offset <- cumsum(bytes_) - bytes_
-    if (!missing(bytes)) 
-      bytes_ <- bytes
-    padding <- which(sapply(dots, get.Ctype)=="pad")
-    if( length(padding) > 0) {
-      dots <- dots[-padding]
-      offset <- offset[-padding]
-    }
-    structure(dots, bytes=as.integer(sum(bytes_)), offset=as.integer(offset), 
-              class=c("struct","Ctype"))
+struct <- function(..., bytes, offset) {
+  dots <- lapply(list(...), as.Ctype)
+  bytes_ <- as.numeric(sapply(dots, sizeof))
+  if(missing(offset))
+    offset <- cumsum(bytes_) - bytes_
+  if(!missing(bytes))
+    bytes_ <- as.numeric(bytes)
+  padding <- which(sapply(dots, get.Ctype) == "pad")
+  if(length(padding) > 0) {
+    dots <- dots[-padding]
+    offset <- offset[-padding]
+  }
+  structure(dots, bytes=sum(bytes_), offset=offset, class=c("struct","Ctype"))
 }
 
 as.list.Ctype <- struct
@@ -255,10 +250,10 @@ as.Ctype.default <- function(x, ...) {
   #  of symbols, so `lapply(x, as.Ctype)` would not fail with a cryptic error message. The error would arise once as.Ctype()
   #  is called on a type that is neither atomic nor recursive, i.e. "symbol", "externalptr", "bytecode", "weakref", or "S4".
   # Since the error message will still be legible in the end, it is acceptable to just use the condition `is.recursive(x)` for simplicity.
-  if (is.atomic(x))
+  if(is.atomic(x))
     # Single field.
     stop(paste("Vector of class '", class(x)[1], "' is unsupported", sep = ""))
-  else if (is.recursive(x))
+  else if(is.recursive(x))
     # Multiple fields.
     do.call(struct, c(lapply(x, as.Ctype), list(...)))
   else
@@ -276,19 +271,19 @@ sizeof <- function(type) UseMethod("sizeof")
 sizeof.function <- function(type) {
   type_name <- deparse(substitute(type))
   type <- try(as.Ctype(type()), silent=TRUE)
-  if( is.Ctype(type))
+  if(is.Ctype(type))
     sizeof(type)
   else
     stop(paste("can't find 'sizeof'",type_name))
 }
 
-sizeof.Ctype <- function(x) attr(x, "bytes")
+sizeof.Ctype <- function(type) attr(type, "bytes")
 
-sizeof.mmap <- function(x) x$bytes
+sizeof.mmap <- function(type) type$bytes
 
 sizeof.default <- function(type) {
-  ty <- try( as.Ctype(type), silent=TRUE)
-  if( is.Ctype(ty))
+  ty <- try(as.Ctype(type), silent=TRUE)
+  if(is.Ctype(ty))
     sizeof(ty)
   else
     stop("unsupported type")

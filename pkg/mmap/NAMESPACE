@@ -1,13 +1,21 @@
 useDynLib(mmap)
 
+importFrom("utils", "head", "read.table", "str")
+
 # user functions
 export(
        mmap,
        munmap,
        msync,
+       madvise,
        mprotect,
+       mlock,
+       munlock,
        
        mmapFlags,
+       pagesize,
+       get.mlock.lim,
+       set.mlock.lim,
 
        is.mmap,
        as.mmap,
@@ -17,14 +25,16 @@ export(
        extractFUN, "extractFUN<-",
        replaceFUN, "replaceFUN<-",
 
+       pad,
+       char, uchar,
        bitset,
        bool8, bool32,
-       char,  int8,  int16,  int32,  
-       uchar, uint8, uint16, int64,
+       int8,  int16,  int32,  
+       uint8, uint16, int64,
        real32, real64,
        cplx,
-       as.uchar, as.char, as.int8, as.uint8, as.int16, as.uint16,
-       pad,
+       string,
+       as.char, as.uchar, as.int8, as.uint8, as.int16, as.uint16, as.string,
 
        struct,
        is.struct,
@@ -33,9 +43,6 @@ export(
        is.Ctype,
        get.Ctype,
 
-       dim.mmap, "dim<-.mmap",
-       dimnames.mmap, "dimnames<-.mmap",
-       is.array.mmap,
        sizeof,
 
        mmap.csv
@@ -58,6 +65,11 @@ S3method(str,mmap)
 S3method(print,mmap)
 S3method(length, mmap)
 S3method('length<-', mmap)
+S3method(dim, mmap)
+S3method('dim<-', mmap)
+S3method(dimnames, mmap)
+S3method('dimnames<-', mmap)
+S3method(is.array, mmap)
 
 S3method(as.mmap, raw)
 S3method(as.mmap, complex)

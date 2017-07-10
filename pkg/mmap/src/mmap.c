@@ -1,26 +1,29 @@
-#include <R.h>
-#include <Rinternals.h>
+#include "mmap.h"
+
 #include <string.h>
+#include <errno.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-
 #include <assert.h>
-#define __STDC_LIMIT_MACROS
-#define __STDC_CONSTANT_MACROS
-#include <stdint.h>
-
-#include "mmap.h"
 
 #ifndef WIN32
 #ifdef HAVE_MMAP
 #  include <sys/mman.h>
+#  include <sys/resource.h>
+#endif
+#ifndef HAVE_STRNLEN
+size_t strnlen(const char *str, size_t max) {
+  const char *end = memchr(str, 0, max);
+  return end ? (size_t)(end - str) : max;
+}
 #endif
 #else
 #include <ctype.h>
 #include <stdio.h>
 #include <windows.h>
+#include <aclapi.h>
 #undef HAVE_MADVISE
 #endif
 
@@ -54,8 +57,20 @@ static inline uint16_t __builtin_bswap16(uint16_t x){return(x<<8)|(x>>8);}
 // Since by definition, byte is synonymous with char and `sizeof(char) == 1`,
 //  a byte would not be 8-bits so `SMODE_CBYTES` and `memcpy` calls will break.
 #if CHAR_BIT != 8
-#error "`char` is not 8-bits"
+#error "`char` is not 8 bits"
 #endif
+// If `cond` is a compile time constant that evaluates to FALSE, then GCC throws
+//  a division by zero error.
+#define STATIC_ASSERT(cond, message) enum { message = 1 / (cond) }
+// We also want to make sure `_FILE_OFFSET_BITS` is working and that `float` and
+//  `double` are the expected sizes.
+STATIC_ASSERT(sizeof(float) == 4, SIZEOF_FLOAT_IS_4);
+STATIC_ASSERT(sizeof(double) == 8, SIZEOF_DOUBLE_IS_4);
+STATIC_ASSERT(sizeof(off_t) == 8, SIZEOF_OFF_T_IS_8);
+// On Win32 and most POSIX implementations, the "OTH" family of permissions are
+//  less significant than the "GRP" and "USR" families. Therefore, we want to
+//  ensure that S_IXOTH is positive and a power of two.
+STATIC_ASSERT(S_IXOTH > 0 && (S_IXOTH & (S_IXOTH - 1)) == 0, HAVE_PMODE);
 
 // For the sake of allowing uninterrupted counting from 0 to overflow, NA values
 //  for unsigned types should be equivalent to UINTn_MAX.
@@ -101,12 +116,13 @@ This package implements all mmap-related calls:
   mmap
   munmap
   msync
+  madvise
   mprotect
 
 The conversion mechnisms to deal with translating
 raw bytes as returned by mmap into R level SEXP are
 abstracted from the user but handled in the C code.
-At present he may read data as R types: "raw", 
+At present he may read data as R types: "raw",
 "integer", and "double".
 
 Future work will entail support for more on-disk
@@ -117,20 +133,20 @@ Comments, criticisms, and concerns should be directed
 to the maintainer of the package.
 */
 
-/* initialize bitmask for bitset() type {{{*/
-int bitmask[32];
-int nbitmask[32];
+/* mmap_init_globals {{{*/
+int32_t bitmask[32];
+int32_t nbitmask[32];
 
-void create_bitmask (void){
+static void create_bitmask (void) {
   int i;
   /* little-endian for now */
-  for(i=0; i<32; i++) {
-     bitmask[i] = 1 << i;
+  for(i = 0; i < 32; i++) {
+    bitmask[i] = 1 << i;
     nbitmask[i] = ~bitmask[i];
   }
 }
 
-SEXP make_bitmask () {
+SEXP mmap_init_globals (void) {
   create_bitmask();
   return R_NilValue;
 } /*}}}*/
@@ -138,57 +154,94 @@ SEXP make_bitmask () {
 /* mmap_mkFlags {{{ */
 SEXP mmap_mkFlags (SEXP _flags) {
   char *cur_string;
-  int len_flags = length(_flags);
+  R_len_t i, len_flags = length(_flags);
   int flags_bit = 0x0;
-  int i;
 
-  for(i=0; i < len_flags; i++) {
-    cur_string = (char *)CHAR(STRING_ELT(_flags,i));
-    if(strcmp(cur_string,"PROT_READ")==0) {
+  for(i = 0; i < len_flags; i++) {
+    cur_string = (char *)CHAR(STRING_ELT(_flags, i));
+    // mprotect() and mmap() prot bits
+    if(strcmp(cur_string, "PROT_READ") == 0) {
       flags_bit = flags_bit | PROT_READ; continue;
-    } else
-    if(strcmp(cur_string,"PROT_WRITE")==0) {
+    } else if(strcmp(cur_string, "PROT_WRITE") == 0) {
       flags_bit = flags_bit | PROT_WRITE; continue;
-    } else
-    if(strcmp(cur_string,"PROT_EXEC")==0) {
+    } else if(strcmp(cur_string, "PROT_EXEC") == 0) {
       flags_bit = flags_bit | PROT_EXEC; continue;
-    } else
-    if(strcmp(cur_string,"PROT_NONE")==0) {
+    } else if(strcmp(cur_string, "PROT_NONE") == 0) {
       flags_bit = flags_bit | PROT_NONE; continue;
-    } else
-    if(strcmp(cur_string,"MS_ASYNC")==0) {
-      flags_bit = flags_bit | MS_ASYNC; continue;
-    } else
-    if(strcmp(cur_string,"MS_SYNC")==0) {
-      flags_bit = flags_bit | MS_SYNC; continue;
-    } else
-    if(strcmp(cur_string,"MS_INVALIDATE")==0) {
-      flags_bit = flags_bit | MS_INVALIDATE; continue;
-    } else
-    if(strcmp(cur_string,"MAP_SHARED")==0) {
-      flags_bit = flags_bit | MAP_SHARED; continue;
-    } else
-    if(strcmp(cur_string,"MAP_PRIVATE")==0) {
-      flags_bit = flags_bit | MAP_PRIVATE; continue;
-    } else
-    if(strcmp(cur_string,"MAP_FIXED")==0) {
-      flags_bit = flags_bit | MAP_FIXED; continue;
 
-#ifdef HAVE_MADVISE
-    } else
-    if(strcmp(cur_string,"MADV_NORMAL")==0) {
+    // msync() flags bits
+    } else if(strcmp(cur_string, "MS_ASYNC") == 0) {
+      flags_bit = flags_bit | MS_ASYNC; continue;
+    } else if(strcmp(cur_string, "MS_SYNC") == 0) {
+      flags_bit = flags_bit | MS_SYNC; continue;
+#ifndef WIN32
+    } else if(strcmp(cur_string, "MS_INVALIDATE") == 0) {
+      flags_bit = flags_bit | MS_INVALIDATE; continue;
+#endif
+
+    // mmap() flags bits
+    } else if(strcmp(cur_string, "MAP_SHARED") == 0) {
+      flags_bit = flags_bit | MAP_SHARED; continue;
+    } else if(strcmp(cur_string, "MAP_PRIVATE") == 0) {
+      flags_bit = flags_bit | MAP_PRIVATE; continue;
+    } else if(strcmp(cur_string, "MAP_ANONYMOUS") == 0) {
+      flags_bit = flags_bit | MAP_ANONYMOUS; continue;
+#ifndef WIN32
+    } else if(strcmp(cur_string, "MAP_FIXED") == 0) {
+      flags_bit = flags_bit | MAP_FIXED; continue;
+    } else if(strcmp(cur_string, "MAP_NORESERVE") == 0) {
+      flags_bit = flags_bit | MAP_NORESERVE; continue;
+#endif
+
+    // mmap()'s open()/shm_open() oflag bits; natively supported by MSVCRT too.
+    } else if(strcmp(cur_string, "O_RDONLY") == 0) {
+      flags_bit = flags_bit | O_RDONLY; continue;
+    } else if(strcmp(cur_string, "O_RDWR") == 0) {
+      flags_bit = flags_bit | O_RDWR; continue;
+    } else if(strcmp(cur_string, "O_CREAT") == 0) {
+      flags_bit = flags_bit | O_CREAT; continue;
+    } else if(strcmp(cur_string, "O_EXCL") == 0) {
+      flags_bit = flags_bit | O_EXCL; continue;
+    } else if(strcmp(cur_string, "O_TRUNC") == 0) {
+      flags_bit = flags_bit | O_TRUNC; continue;
+
+    // mmap()'s open()/shm_open() mode bits; partly supported by MSVCRT too.
+    } else if(strcmp(cur_string, "S_IRUSR") == 0) {
+      flags_bit = flags_bit | S_IRUSR; continue;
+    } else if(strcmp(cur_string, "S_IWUSR") == 0) {
+      flags_bit = flags_bit | S_IWUSR; continue;
+    } else if(strcmp(cur_string, "S_IXUSR") == 0) {
+      flags_bit = flags_bit | S_IXUSR; continue;
+    } else if(strcmp(cur_string, "S_IRWXU") == 0) {
+      flags_bit = flags_bit | S_IRWXU; continue;
+    } else if(strcmp(cur_string, "S_IRGRP") == 0) {
+      flags_bit = flags_bit | S_IRGRP; continue;
+    } else if(strcmp(cur_string, "S_IWGRP") == 0) {
+      flags_bit = flags_bit | S_IWGRP; continue;
+    } else if(strcmp(cur_string, "S_IXGRP") == 0) {
+      flags_bit = flags_bit | S_IXGRP; continue;
+    } else if(strcmp(cur_string, "S_IRWXG") == 0) {
+      flags_bit = flags_bit | S_IRWXG; continue;
+    } else if(strcmp(cur_string, "S_IROTH") == 0) {
+      flags_bit = flags_bit | S_IROTH; continue;
+    } else if(strcmp(cur_string, "S_IWOTH") == 0) {
+      flags_bit = flags_bit | S_IWOTH; continue;
+    } else if(strcmp(cur_string, "S_IXOTH") == 0) {
+      flags_bit = flags_bit | S_IXOTH; continue;
+    } else if(strcmp(cur_string, "S_IRWXO") == 0) {
+      flags_bit = flags_bit | S_IRWXO; continue;
+
+    // madvise() advice enum
+    } else if(strcmp(cur_string, "MADV_NORMAL") == 0) {
       flags_bit = flags_bit | MADV_NORMAL; continue;
-    } else
-    if(strcmp(cur_string,"MADV_RANDOM")==0) {
+#if defined(HAVE_MADVISE) || defined(WIN32)
+    } else if(strcmp(cur_string, "MADV_RANDOM") == 0) {
       flags_bit = flags_bit | MADV_RANDOM; continue;
-    } else
-    if(strcmp(cur_string,"MADV_SEQUENTIAL")==0) {
+    } else if(strcmp(cur_string, "MADV_SEQUENTIAL") == 0) {
       flags_bit = flags_bit | MADV_SEQUENTIAL; continue;
-    } else
-    if(strcmp(cur_string,"MADV_WILLNEED")==0) {
+    } else if(strcmp(cur_string, "MADV_WILLNEED") == 0) {
       flags_bit = flags_bit | MADV_WILLNEED; continue;
-    } else
-    if(strcmp(cur_string,"MADV_DONTNEED")==0) {
+    } else if(strcmp(cur_string, "MADV_DONTNEED") == 0) {
       flags_bit = flags_bit | MADV_DONTNEED; continue;
 #endif
 
@@ -196,80 +249,641 @@ SEXP mmap_mkFlags (SEXP _flags) {
       warning("unknown constant: skipped");
     }
   }
-#ifdef WIN32
-  flags_bit = PAGE_READWRITE;
-  if(flags_bit & PROT_READ & PROT_WRITE & MAP_SHARED)
-    flags_bit = PAGE_READWRITE;
-  else if(flags_bit & MAP_PRIVATE)
-    flags_bit = PAGE_WRITECOPY;
-  else if(flags_bit & PROT_READ)
-    flags_bit = PAGE_READONLY;
-#endif
   return ScalarInteger(flags_bit);
 } /*}}}*/
 
 /* mmap_munmap {{{ */
 #ifdef WIN32
+#define BUFSIZE 8192
+
+static void rperror (const char *format) {
+  // `Rf_error()` calls `longjmp()` to a location set further up the call stack
+  //  and never returns here to where it was invoked. Since `errorText` must be
+  //  valid when passed to `Rf_error()`, yet we cannot explicitly free it from
+  //  the heap after the call to `Rf_error()`, we must use either a stack
+  //  variable or a static variable.
+  static __thread TCHAR errorText[BUFSIZE];
+  
+  HRESULT errnum = HRESULT_FROM_WIN32(GetLastError());
+  if(!FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, errnum, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, BUFSIZE, NULL))
+    snprintf(errorText, BUFSIZE, "0x%lx", errnum);
+  
+  error(format, errorText);
+}
+
+static void rpwarning (const char *format) {
+  LPTSTR errorText = NULL;
+  
+  HRESULT errnum = HRESULT_FROM_WIN32(GetLastError());
+  if(!FormatMessage(FORMAT_MESSAGE_FROM_SYSTEM|FORMAT_MESSAGE_ALLOCATE_BUFFER|FORMAT_MESSAGE_IGNORE_INSERTS, NULL, errnum, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPTSTR)&errorText, 0, NULL) || errorText == NULL) {
+    errorText = LocalAlloc(LMEM_FIXED, snprintf(NULL, 0, "0x%lx", errnum) + 1);
+    sprintf(errorText, "0x%lx", errnum);
+  }
+  
+  warning(format, errorText);
+  LocalFree(errorText);
+}
+
 SEXP mmap_munmap (SEXP mmap_obj) {
-  int ret;
-  char *data = MMAP_DATA(mmap_obj);
+  int success;
+  unsigned char *data = MMAP_DATA(mmap_obj);
   HANDLE fd = (HANDLE)MMAP_FD(mmap_obj);
   HANDLE mh = (HANDLE)MMAP_HANDLE(mmap_obj);
+  int pageoff = MMAP_PAGEOFF(mmap_obj);
 
-  if(data == NULL)
-    error("invalid mmap pointer");
-
-  ret = UnmapViewOfFile(data);
+  if(data == NULL) {
+    success = 0;
+    warning("unable to munmap file: Invalid mmap pointer.");
+  } else {
+    success = !!UnmapViewOfFile((unsigned char *)(data - pageoff));
+    if(!success)
+      rpwarning("unable to munmap file: %s");
+  }
+  
+  // We don't actually need to keep the HANDLE returned by `CreateFileMapping()`
+  //  around but instead can just `CloseHandle()` it after `MapViewOfFile()`:
+  //  "to fully close a file mapping object, an application must unmap all
+  //  mapped views of the file mapping object by calling UnmapViewOfFile and
+  //  close the file mapping object handle by calling CloseHandle. These
+  //  functions can be called in any order."
+  // The fildes, on the other hand, is needed in `mmap_msync()`, although it too
+  //  is safe to close after `CreateFileMapping()`: "although an application may
+  //  close the file handle used to create a file mapping object, the system
+  //  holds the corresponding file open until the last view of the file is
+  //  unmapped. Files for which the last view has not yet been unmapped are held
+  //  open with no sharing restrictions."
   CloseHandle(mh);
-  CloseHandle(fd);
-  R_ClearExternalPtr(findVar(install("data"),mmap_obj));
-  return(ScalarInteger(ret));
+  if(fd != INVALID_HANDLE_VALUE)
+    CloseHandle(fd);
+  R_ClearExternalPtr(findVar(install("data"), mmap_obj));
+  return(ScalarLogical(success));
 }
 #else
-SEXP mmap_munmap (SEXP mmap_obj) {
-  char *data = MMAP_DATA(mmap_obj);
-  int fd = MMAP_FD(mmap_obj);
-
-  if(data == NULL)
-    error("invalid mmap pointer");
-
-  int ret = munmap(data, MMAP_SIZE(mmap_obj));
-  close(fd); /* should be moved back to R */
-  //R_ClearExternalPtr(VECTOR_ELT(mmap_obj,0));
-  R_ClearExternalPtr(findVar(install("data"),mmap_obj));
-  /*R_ClearExternalPtr(MMAP_DATA(mmap_obj));*/
-  return(ScalarInteger(ret)); 
-} /*}}}*/
-
-/*
-void mmap_finalizer (SEXP mmap_obj) {
-  Rprintf("mmap_finalizer called\n");
-  mmap_munmap((SEXP)R_ExternalPtrAddr(mmap_obj));
+static void rperror (const char *format) {
+  error(format, strerror(errno));
 }
-*/
-#endif
 
-/* mmap_mmap AND mmap_finalizer {{{ */
+static void rpwarning (const char *format) {
+  warning(format, strerror(errno));
+}
+
+SEXP mmap_munmap (SEXP mmap_obj) {
+  int success;
+  unsigned char *data = MMAP_DATA(mmap_obj);
+  int fd = MMAP_FD(mmap_obj);
+  int pageoff = MMAP_PAGEOFF(mmap_obj);
+
+  if(data == NULL) {
+    success = 0;
+    warning("unable to munmap file: Invalid mmap pointer.");
+  } else {
+    success = !munmap((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff));
+    if(!success)
+      rpwarning("unable to munmap file: %s");
+  }
+
+  SEXP fd_obj = findVar(install("filedesc"), mmap_obj);
+  if(strcmp(CHAR(asChar(getAttrib(fd_obj, install("backedby")))), "shared") == 0)
+    shm_unlink(CHAR(asChar(getAttrib(fd_obj, R_NamesSymbol))));
+  // We don't actually need to keep the fildes around but instead can just
+  //  `close()` it after `mmap()` in `mmap_mmap()`: "the mmap() function adds an
+  //  extra reference to the file associated with the file descriptor fildes
+  //  which is not removed by a subsequent close() on that file descriptor. This
+  //  reference is removed when there are no more mappings to the file."
+  close(fd);
+  R_ClearExternalPtr(findVar(install("data"), mmap_obj));
+  return(ScalarLogical(success));
+}
+#endif
+/*}}}*/
+
+/* mmap_mmap {{{ */
 #ifdef WIN32
-SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
-                SEXP _flags, SEXP _len, SEXP _off, SEXP _pageoff) {
-  char *data;
-  struct stat st;
+static int get_acl_max_prot_and_acc (SECURITY_DESCRIPTOR *sec_des, GENERIC_MAPPING mapping, int oflag, DWORD *max_prot, DWORD *max_acc) {
+  HANDLE token = INVALID_HANDLE_VALUE;
+  HANDLE imp_token = INVALID_HANDLE_VALUE;
+  DWORD token_acc = TOKEN_IMPERSONATE | TOKEN_READ | TOKEN_DUPLICATE;
+  DWORD granted_acc, des_acc;
+  PRIVILEGE_SET priv_set = { 0 };
+  DWORD priv_set_len = sizeof(priv_set);
+  BOOL has_r_acc, has_w_acc, has_x_acc;
+  int success = 0;
+  
+  // Allocate the resource and get the current process's effective access token.
+  if(!OpenThreadToken(GetCurrentThread(), token_acc, TRUE, &token)
+       && (GetLastError() != ERROR_NO_TOKEN || !OpenProcessToken(GetCurrentProcess(), token_acc, &token)))
+    goto done;
+  
+  // Create an impersonation token.
+  if(!DuplicateToken(token, SecurityImpersonation, &imp_token))
+    goto done;
+  
+  des_acc = GENERIC_READ;
+  MapGenericMask(&des_acc, &mapping);
+  if(!AccessCheck(sec_des, imp_token, des_acc, &mapping, &priv_set, &priv_set_len, &granted_acc, &has_r_acc))
+    goto done;
+  
+  des_acc = GENERIC_WRITE;
+  MapGenericMask(&des_acc, &mapping);
+  if(!AccessCheck(sec_des, imp_token, des_acc, &mapping, &priv_set, &priv_set_len, &granted_acc, &has_w_acc))
+    goto done;
+  
+  des_acc = GENERIC_EXECUTE;
+  MapGenericMask(&des_acc, &mapping);
+  if(!AccessCheck(sec_des, imp_token, des_acc, &mapping, &priv_set, &priv_set_len, &granted_acc, &has_x_acc))
+    goto done;
+  
+  has_r_acc = !!(has_r_acc && ((oflag & O_RDWR) == O_RDWR || (oflag & O_RDONLY) == O_RDONLY));
+  has_w_acc = !!(has_w_acc && ((oflag & O_RDWR) == O_RDWR || (oflag & O_WRONLY) == O_WRONLY));
+  switch(has_r_acc << 2 | has_w_acc << 1 | has_x_acc << 0) {
+  case 1 << 2 | 1 << 1 | 1 << 0: // rwx
+    *max_prot = PAGE_EXECUTE_READWRITE;
+    *max_acc = FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE;
+    break;
+  case 1 << 2 | 1 << 1 | 0 << 0: // rw-
+    *max_prot = PAGE_READWRITE;
+    *max_acc = FILE_MAP_READ | FILE_MAP_WRITE;
+    break;
+  case 1 << 2 | 0 << 1 | 1 << 0: // r-x
+    *max_prot = PAGE_EXECUTE_READ;
+    *max_acc = FILE_MAP_READ | FILE_MAP_EXECUTE;
+    break;
+  case 1 << 2 | 0 << 1 | 0 << 0: // r--
+    *max_prot = PAGE_READONLY;
+    *max_acc = FILE_MAP_READ;
+    break;
+  case 0 << 2 | 0 << 1 | 1 << 0: // --x
+    *max_prot = PAGE_EXECUTE;
+    *max_acc = FILE_MAP_EXECUTE;
+    break;
+  default: // -wx, -w-, ---
+    *max_prot = PAGE_NOACCESS;
+    *max_acc = 0;
+    break;
+  }
+  
+  success = 1;
+done:
+  if(imp_token != INVALID_HANDLE_VALUE) CloseHandle(imp_token);
+  if(token != INVALID_HANDLE_VALUE) CloseHandle(token);
+  return success;
+}
+
+static int get_pmode_max_prot_and_acc (int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
+  switch(pmode & (S_IRUSR | S_IWUSR | S_IXUSR)) {
+  case S_IRUSR | S_IWUSR | S_IXUSR: // rwx
+    *max_prot = PAGE_EXECUTE_READWRITE;
+    *max_acc = FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE;
+    break;
+  case S_IRUSR | S_IWUSR | 0      : // rw-
+    *max_prot = PAGE_READWRITE;
+    *max_acc = FILE_MAP_READ | FILE_MAP_WRITE;
+    break;
+  case S_IRUSR | 0       | S_IXUSR: // r-x
+    *max_prot = PAGE_EXECUTE_READ;
+    *max_acc = FILE_MAP_READ | FILE_MAP_EXECUTE;
+    break;
+  case S_IRUSR | 0       | 0      : // r--
+    *max_prot = PAGE_READONLY;
+    *max_acc = FILE_MAP_READ;
+    break;
+  case 0       | 0       | S_IXUSR: // --x
+    *max_prot = PAGE_EXECUTE;
+    *max_acc = FILE_MAP_EXECUTE;
+    break;
+  default: // -wx, -w-, ---
+    *max_prot = PAGE_NOACCESS;
+    *max_acc = 0;
+    break;
+  }
+  return 1;
+}
+
+static int get_file_max_prot_and_acc (LPCTSTR file, int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
+  GENERIC_MAPPING mapping = { FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_GENERIC_EXECUTE, FILE_ALL_ACCESS };
+  SECURITY_DESCRIPTOR *secDes = NULL;
+  int success = 0;
+  if(GetNamedSecurityInfo((LPTSTR)file, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, (void **)&secDes) != ERROR_SUCCESS) {
+    if(GetLastError() == ERROR_FILE_NOT_FOUND)
+      success = get_pmode_max_prot_and_acc(pmode, oflag, max_prot, max_acc);
+    goto done;
+  }
+  success = get_acl_max_prot_and_acc(secDes, mapping, oflag, max_prot, max_acc);
+  
+done:
+  if(secDes != NULL) LocalFree(secDes);
+  return success;
+}
+
+static int get_share_max_prot_and_acc (LPCTSTR sharename, int pmode, int oflag, DWORD *max_prot, DWORD *max_acc) {
+  GENERIC_MAPPING mapping = { FILE_MAP_READ, FILE_MAP_WRITE, FILE_MAP_EXECUTE, FILE_MAP_ALL_ACCESS };
+  SECURITY_DESCRIPTOR *secDes = NULL;
+  int success = 0;
+  if(GetNamedSecurityInfo((LPTSTR)sharename, SE_KERNEL_OBJECT, OWNER_SECURITY_INFORMATION | GROUP_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, (void **)&secDes) != ERROR_SUCCESS) {
+    if(GetLastError() == ERROR_FILE_NOT_FOUND)
+      success = get_pmode_max_prot_and_acc(pmode, oflag, max_prot, max_acc);
+    goto done;
+  }
+  success = get_acl_max_prot_and_acc(secDes, mapping, oflag, max_prot, max_acc);
+  
+done:
+  if(secDes != NULL) LocalFree(secDes);
+  return success;
+}
+
+// open() mode bits -> ACL access permissions bits.
+static DWORD translate_pmode_des_acc (int pmode, int r, int w, int x) {
+  DWORD des_acc = 0;
+  
+  if(pmode & r)
+    des_acc |= GENERIC_READ;
+  if(pmode & w)
+    des_acc |= GENERIC_WRITE;
+  if(pmode & x)
+    des_acc |= GENERIC_EXECUTE;
+  if((pmode & (r | w | x)) == (r | w | x))
+    des_acc = GENERIC_ALL;
+  
+  return des_acc;
+}
+
+struct sec_desc_refs {
+  EXPLICIT_ACCESS ea[3];
+  HANDLE token;
+  TOKEN_OWNER *tokUsr;
+  TOKEN_PRIMARY_GROUP *tokGrp;
+  SID *othSID;
+  ACL *acl;
+};
+
+static int translate_pmode_sec_attr (SECURITY_ATTRIBUTES *secAttr, SECURITY_DESCRIPTOR *secDesc, struct sec_desc_refs *refs, int pmode) {
+  refs->token = INVALID_HANDLE_VALUE;
+  refs->tokUsr = NULL;
+  refs->tokGrp = NULL;
+  refs->othSID = NULL;
+  refs->acl = NULL;
+  
+  int success = 0;
+  DWORD tokUsrSz, tokGrpSz;
+  DWORD errnum;
+  
+  // Initialize secDesc to an empty SECURITY_DESCRIPTOR.
+  if(!InitializeSecurityDescriptor(secDesc, SECURITY_DESCRIPTOR_REVISION))
+    goto done; // 0
+  
+  // Allocate the resource and get the current process's effective (impersonated) access token.
+  if(!OpenThreadToken(GetCurrentThread(), TOKEN_QUERY, TRUE, &refs->token)
+       && (GetLastError() != ERROR_NO_TOKEN || !OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &refs->token)))
+    goto done; // 0
+  
+  // Fetch the buffer size needed for TokenOwner by passing NULL and 0.
+  if(!GetTokenInformation(refs->token, TokenOwner, NULL, 0, &tokUsrSz) && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+    goto done; // 1
+  // Allocate the buffer on the heap.
+  if((refs->tokUsr = (TOKEN_OWNER *)LocalAlloc(LPTR, tokUsrSz)) == NULL)
+    goto done; // 1
+  // Fill the buffer with the usrSID.
+  if(!GetTokenInformation(refs->token, TokenOwner, refs->tokUsr, tokUsrSz, &tokUsrSz))
+    goto done; // 2
+  
+  // Fetch the buffer size needed for TokenPrimaryGroup by passing NULL and 0.
+  if(!GetTokenInformation(refs->token, TokenPrimaryGroup, NULL, 0, &tokGrpSz) && GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+    goto done; // 2
+  // Allocate the buffer on the heap.
+  if((refs->tokGrp = (TOKEN_PRIMARY_GROUP *)LocalAlloc(LPTR, tokGrpSz)) == NULL)
+    goto done; // 2
+  // Fill the buffer with the grpSID.
+  if(!GetTokenInformation(refs->token, TokenPrimaryGroup, refs->tokGrp, tokGrpSz, &tokGrpSz))
+    goto done; // 3
+  
+  // Allocate and fill the buffer with the othSID on the heap.
+  if(!AllocateAndInitializeSid(&(SID_IDENTIFIER_AUTHORITY){SECURITY_WORLD_SID_AUTHORITY}, 1,
+                               SECURITY_WORLD_RID, 0, 0, 0, 0, 0, 0, 0, (void**)&refs->othSID))
+    goto done; // 3
+  
+  // Initialize all members in ea to an empty EXPLICIT_ACCESS.
+  ZeroMemory(&refs->ea, 3 * sizeof(EXPLICIT_ACCESS));
+  
+  refs->ea[0].grfAccessPermissions = translate_pmode_des_acc(pmode, S_IRUSR, S_IWUSR, S_IXUSR);
+  refs->ea[0].grfAccessMode = SET_ACCESS;
+  refs->ea[0].grfInheritance= CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+  refs->ea[0].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  refs->ea[0].Trustee.TrusteeType = TRUSTEE_IS_USER;
+  refs->ea[0].Trustee.ptstrName  = (LPTSTR) refs->tokUsr->Owner;
+  
+  refs->ea[1].grfAccessPermissions = translate_pmode_des_acc(pmode, S_IRGRP, S_IWGRP, S_IXGRP);
+  refs->ea[1].grfAccessMode = SET_ACCESS;
+  refs->ea[1].grfInheritance= CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+  refs->ea[1].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  refs->ea[1].Trustee.TrusteeType = TRUSTEE_IS_GROUP;
+  refs->ea[1].Trustee.ptstrName  = (LPTSTR) refs->tokGrp->PrimaryGroup;
+  
+  refs->ea[2].grfAccessPermissions = translate_pmode_des_acc(pmode, S_IROTH, S_IWOTH, S_IXOTH);
+  refs->ea[2].grfAccessMode = SET_ACCESS;
+  refs->ea[2].grfInheritance= CONTAINER_INHERIT_ACE | OBJECT_INHERIT_ACE;
+  refs->ea[2].Trustee.TrusteeForm = TRUSTEE_IS_SID;
+  refs->ea[2].Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+  refs->ea[2].Trustee.ptstrName  = (LPTSTR) refs->othSID;
+  
+  // Allocate a new ACL for the defined `ea` on the heap and assign it to `secDesc`.
+  if((errnum = SetEntriesInAcl(3, refs->ea, NULL, &refs->acl)) != ERROR_SUCCESS) {
+    SetLastError(errnum);
+    goto done; // 4
+  }
+  if(!SetSecurityDescriptorDacl(secDesc, 1, refs->acl, 0))
+    goto done; // 5
+  
+  secAttr->nLength = sizeof(SECURITY_ATTRIBUTES);
+  secAttr->lpSecurityDescriptor = secDesc;
+  secAttr->bInheritHandle = 1;
+  success = 1;
+  
+done:
+  return success;
+}
+
+static void free_sec_desc (struct sec_desc_refs *refs) {
+  // NOTE: the resources must be deallocated in the same order as they are
+  //  allocated in `translate_pmode_sec_attr()` so that we can early exit.
+  // If CloseHandle(), LocalFree(), or FreeSid() fail, we don't care. Restore
+  //  the current errno at the end in case it is overwritten.
+  DWORD errnum = GetLastError();
+  
+  // 0
+  if(refs->token == INVALID_HANDLE_VALUE) goto done;
+  // 1
+  CloseHandle(refs->token);
+  refs->token = INVALID_HANDLE_VALUE;
+  if(refs->tokUsr == NULL) goto done;
+  // 2
+  LocalFree(refs->tokUsr);
+  refs->tokUsr = NULL;
+  if(refs->tokGrp == NULL) goto done;
+  // 3
+  LocalFree(refs->tokGrp);
+  refs->tokGrp = NULL;
+  if(refs->othSID == NULL) goto done;
+  // 4
+  FreeSid(refs->othSID);
+  refs->othSID = NULL;
+  if(refs->acl == NULL) goto done;
+  // 5
+  LocalFree(refs->acl);
+  refs->acl = NULL;
+  
+done:
+  SetLastError(errnum);
+}
+
+// open() oflag bits -> CreateFile() desired access bits.
+static DWORD translate_oflag_des_acc (int oflag, DWORD max_acc) {
+  // Not specifying exactly one of O_RDONLY or O_RDWR is unspecified behavior so
+  //  don't bother checking that particular case.
+  if((oflag & O_RDWR) == O_RDWR) {
+    if(max_acc & FILE_MAP_EXECUTE)
+      return GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE;
+    else
+      return GENERIC_READ | GENERIC_WRITE;
+  } else if((oflag & O_RDONLY) == O_RDONLY) {
+    if(max_acc & FILE_MAP_EXECUTE)
+      return GENERIC_READ | GENERIC_EXECUTE;
+    else
+      return GENERIC_READ;
+  }
+  return 0;
+}
+
+// open() oflag bits -> CreateFile() creation disposition enum.
+static DWORD translate_oflag_creat_disp (int oflag) {
+  // O_EXCL without O_CREAT behaves as if neither was specified.
+  switch(oflag & (O_CREAT | O_EXCL | O_TRUNC)) {
+  default:
+  case 0       | 0      | 0:
+  case 0       | O_EXCL | 0:
+    // Open a file; fail if it doesn't already exist.
+    return OPEN_EXISTING;
+  case 0       | 0      | O_TRUNC:
+  case 0       | O_EXCL | O_TRUNC:
+    // Clear a file; fail if it doesn't already exist.
+    return TRUNCATE_EXISTING;
+  case O_CREAT | 0      | 0:
+    // Open a file; create one first if it doesn't already exist.
+    return OPEN_ALWAYS;
+  case O_CREAT | 0      | O_TRUNC:
+    // Clear a file; create one first if it doesn't already exist.
+    return CREATE_ALWAYS;
+  case O_CREAT | O_EXCL | 0:
+  case O_CREAT | O_EXCL | O_TRUNC:
+    // Clear a file; fail if it does already exist.
+    return CREATE_NEW;
+  }
+}
+
+// mmap() prot bits and flags bits -> MapViewOfFile() prot enum.
+// mprotect() prot bits -> VirtualProtect() prot enum.
+static DWORD translate_prot_and_flags (int prot, int flags) {
+  if(prot & PROT_WRITE) {
+    if(flags & MAP_SHARED) {
+      if(prot & PROT_EXEC)
+        return PAGE_EXECUTE_READWRITE;
+      else
+        return PAGE_READWRITE;
+    } else if(flags & MAP_PRIVATE) {
+      if(prot & PROT_EXEC)
+        return PAGE_EXECUTE_WRITECOPY;
+      else
+        return PAGE_WRITECOPY;
+    }
+  } else if(prot & PROT_READ) {
+    if(prot & PROT_EXEC)
+      return PAGE_EXECUTE_READ;
+    else
+      return PAGE_READONLY;
+  } else if(prot == PROT_NONE) {
+    return PAGE_NOACCESS;
+  }
+  
+  return 0;
+}
+
+// madvise() advice enum -> CreateFile() flag bits.
+static DWORD translate_advice_cf (SEXP _advice) {
+  int *advice_p;
+  R_len_t i, len = length(_advice);
+  DWORD cf_advice = 0;
+  
+  PROTECT(_advice = coerceVector(_advice, INTSXP));
+  advice_p = INTEGER(_advice);
+  for(i = 0; i < len; i++) {
+    switch(advice_p[i]) {
+    case MADV_NORMAL:
+      cf_advice |= FILE_ATTRIBUTE_NORMAL;
+      break;
+    case MADV_RANDOM:
+      cf_advice |= FILE_FLAG_RANDOM_ACCESS;
+      break;
+    case MADV_SEQUENTIAL:
+      cf_advice |= FILE_FLAG_SEQUENTIAL_SCAN;
+      break;
+    }
+  }
+  
+  UNPROTECT(1);
+  return cf_advice;
+}
+
+SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _sharename, SEXP _prot,
+                SEXP _flags, SEXP _oflag, SEXP _pmode, SEXP _advice,
+                SEXP _len, SEXP _off, SEXP _pageoff) {
+  unsigned char *data;
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
+  int oflag = (xlength(_flags) == 0) ? 0 : asInteger(_oflag);
+  int pmode = (xlength(_pmode) == 0) ? 0 : asInteger(_pmode);
+  int flags = asInteger(_flags);
+  SECURITY_ATTRIBUTES secAttr;
+  SECURITY_DESCRIPTOR secDesc;
+  struct sec_desc_refs tmp_resrc;
+  int zero_view = 0;
+  
+  assert(asReal(_pageoff) <= INT_MAX_VALUE);
+  if(asReal(_len) + asInteger(_pageoff) > (SIZE_T)-1)
+    error("unable to mmap file: Requested length is too high.");
+  
+  if((!(flags & MAP_PRIVATE) && !(flags & MAP_SHARED)) || ((flags & MAP_PRIVATE) && (flags & MAP_SHARED)))
+    error("unable to mmap file: Exactly one of MAP_PRIVATE or MAP_SHARED must be set.");
+  
+  HANDLE hFile, hMap;
+  DWORD max_prot, max_acc;
+  
+  ULARGE_INTEGER len = {.QuadPart  = (uint64_t)(asReal(_len) + asInteger(_pageoff) + asReal(_off))};
+  if(xlength(_fildesc) != 0 && xlength(_sharename) != 0) {
+    error("unable to mmap file: File name and share name were both given.");
+  } else if(xlength(_fildesc) != 0) {
+    if(flags == MAP_ANONYMOUS)
+      error("unable to mmap file: File name was given but MAP_ANONYMOUS was set.");
+    
+    // Give the system's most permissive access to `CreateFile()` first so that
+    //  we can give the most permissive protections to `CreateFileMapping()` and
+    //  the most permissive access to `MapViewOfFile()`.
+    // Then we can grant more permissions of the pointer at any time without a
+    //  problem through `VirtualProtect()` in `mmap_mprotect()`. Otherwise, we
+    //  could only deny existing permissions later but not grant new ones.
+    if(!get_file_max_prot_and_acc(CHAR(asChar(_fildesc)), pmode, oflag, &max_prot, &max_acc))
+      rperror("unable to open file: %s");
+    
+    if(!translate_pmode_sec_attr(&secAttr, &secDesc, &tmp_resrc, pmode)) {
+      free_sec_desc(&tmp_resrc);
+      rperror("unable to open file: %s");
+    }
+    hFile = CreateFile(CHAR(asChar(_fildesc)),
+                    translate_oflag_des_acc(oflag, max_acc),
+                    FILE_SHARE_READ | FILE_SHARE_WRITE, &secAttr,
+                    translate_oflag_creat_disp(oflag),
+                    translate_advice_cf(_advice), NULL);
+    if(hFile == INVALID_HANDLE_VALUE) {
+      free_sec_desc(&tmp_resrc);
+      rperror("unable to open file: %s");
+    }
+    if((intptr_t)hFile > INT_MAX || (intptr_t)hFile < INT_MIN) {
+      free_sec_desc(&tmp_resrc);
+      CloseHandle(hFile);
+      error("unable to open file: File descriptor overflow.");
+    }
+    
+    hMap = CreateFileMapping(hFile, &secAttr, max_prot, len.HighPart, len.LowPart, NULL);
+    free_sec_desc(&tmp_resrc);
+  } else if(xlength(_sharename) != 0) {
+    if(flags == MAP_ANONYMOUS)
+      error("unable to mmap file: Share name was given but MAP_ANONYMOUS was set.");
+    
+    if(!get_share_max_prot_and_acc(CHAR(asChar(_sharename)), pmode, oflag, &max_prot, &max_acc))
+      rperror("unable to open file: %s");
+    
+    hFile = INVALID_HANDLE_VALUE;
+    if(oflag & O_CREAT) {
+      if(!translate_pmode_sec_attr(&secAttr, &secDesc, &tmp_resrc, pmode)) {
+        free_sec_desc(&tmp_resrc);
+        rperror("unable to open file: %s");
+      }
+      hMap = CreateFileMapping(hFile, &secAttr, max_prot, len.HighPart, len.LowPart, CHAR(asChar(_sharename)));
+      free_sec_desc(&tmp_resrc);
+      if(hMap != NULL && GetLastError() == ERROR_ALREADY_EXISTS) {
+        if(oflag & O_EXCL) {
+          CloseHandle(hMap);
+          hMap = NULL;
+        } else if(oflag & O_TRUNC) {
+          zero_view = 1;
+        }
+      }
+    } else {
+      // MapViewOfFile() doesn't complain if `len` is greater than the initial
+      //  `len` of the shared memory mapping. If it ever does, we must use
+      //  `CreateFileMapping()` instead and throw an error if that call does not
+      //  throw `ERROR_ALREADY_EXISTS`.
+      hMap = OpenFileMapping(max_acc, 1, CHAR(asChar(_sharename)));
+      if(oflag & O_TRUNC)
+        zero_view = 1;
+    }
+  } else {
+    if(!(flags & MAP_ANONYMOUS))
+      error("unable to mmap file: Neither file name and share name were given but MAP_ANONYMOUS was not set.");
+    if(xlength(_oflag) != 0)
+      error("unable to mmap file: oflag was given but neither file name nor share name were given.");
+    if(xlength(_pmode) != 0)
+      error("unable to mmap file: pmode was given but neither file name nor share name were given.");
+    // `MAP_ANONYMOUS | MAP_SHARED` is meaningful on Linux because processes can
+    //  be forked after the call to `mmap()` and the child will retain the same
+    //  memory mapping. There is no such functionality on Windows, so it is
+    //  impossible to share the nameless memory mapping with anyone else.
+    // Additionally, accepting a non-zero `off` is not meaningful for
+    //  `MAP_ANONYMOUS` because all of the bytes skipped over will always be
+    //  initialized to 0 and will only ever be accessible to us.
+    // Still, we will just let Win32 decide whether to accept these useless
+    //  combinations of parameters. Our own parameter checking should merely
+    //  ensure that _fildesc and _sharename are ignored when `MAP_ANONYMOUS` is
+    //  set, to imitate the interface for most Unix-like operating systems.
+    // Similarly, we leave much of the parameter checking to the kernel in our
+    //  POSIX implementation in order to provide as low-level an interface as
+    //  possible. For example, when `flags & MAP_ANONYMOUS`, we'll let FreeBSD
+    //  complain if `off != 0 || fildes != -1`; but we'll also let Solaris,
+    //  OpenBSD, NetBSD, HP-UX, and AIX complain only if `fildes != -1`; and let
+    //  Linux just ignore `fildes`; and let macOS just ignore `off`.
+    
+    max_prot = PAGE_EXECUTE_READWRITE;
+    max_acc = FILE_MAP_READ | FILE_MAP_WRITE | FILE_MAP_EXECUTE;
+    
+    hFile = INVALID_HANDLE_VALUE;
+    hMap = CreateFileMapping(hFile, NULL, max_prot, len.HighPart, len.LowPart, NULL);
+  }
 
-  stat(CHAR(STRING_ELT(_fildesc,0)), &st);
-
-  HANDLE hFile=CreateFile(CHAR(STRING_ELT(_fildesc,0)),
-                  GENERIC_READ|GENERIC_WRITE,
-                  FILE_SHARE_READ|FILE_SHARE_WRITE,NULL,OPEN_EXISTING,0,NULL);
-
-  HANDLE hMap=CreateFileMapping(hFile,NULL,PAGE_READWRITE,0,0,NULL);
-  DWORD dwFileSize=GetFileSize(hFile,NULL);
-  data = (char *)MapViewOfFile(hMap,FILE_MAP_WRITE,0,0,dwFileSize);
-  /* advance ptr to byte offset from page boundary - shouldn't we do this above?? JR */
-  data = data + asInteger(_off) + asInteger(_pageoff); 
-
+  if(hMap == NULL) {
+    CloseHandle(hFile);
+    rperror("unable to mmap file: %s");
+  }
+  if((intptr_t)hMap > INT_MAX || (intptr_t)hMap < INT_MIN) {
+    CloseHandle(hMap);
+    CloseHandle(hFile);
+    error("unable to mmap file: Map handle overflow.");
+  }
+  ULARGE_INTEGER off = {.QuadPart  = (uint64_t)asReal(_off)};
+  data = (unsigned char *)MapViewOfFile(hMap, max_acc, off.HighPart, off.LowPart, (SIZE_T)(asReal(_len) + asInteger(_pageoff)));
+  if(data == NULL) {
+    CloseHandle(hMap);
+    CloseHandle(hFile);
+    rperror("unable to mmap file: %s");
+  }
+  if(!VirtualProtect(data, (SIZE_T)(asReal(_len) + asInteger(_pageoff)), translate_prot_and_flags(asInteger(_prot), flags), &max_prot)) {
+    CloseHandle(hMap);
+    CloseHandle(hFile);
+    rperror("unable to mmap file: %s");
+  }
+  if(zero_view)
+    // This doesn't quite do the trick when `MAP_PRIVATE` is set, but it's the
+    //  best we can do when `O_TRUNC` is specified for shared memory.
+    ZeroMemory(data, (SIZE_T)(asReal(_len) + asInteger(_pageoff)));
+  
+  data = data + asInteger(_pageoff); /* advance ptr to byte offset from page boundary */
 
   SEXP mmap_obj;
   PROTECT(mmap_obj = allocSExp(ENVSXP));
@@ -277,37 +891,68 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   SET_ENCLOS(mmap_obj, R_NilValue);
   SET_HASHTAB(mmap_obj, R_NilValue);
   SET_ATTRIB(mmap_obj, R_NilValue);
-  defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue),mmap_obj);
-  //defineVar(install("bytes"), ScalarReal(asReal(_len)-asInteger(_off)-asInteger(_pageoff)),mmap_obj);
-  defineVar(install("bytes"), _len,mmap_obj);
-  defineVar(install("filedesc"), ScalarInteger((int)hFile),mmap_obj);
-  defineVar(install("storage.mode"), _type,mmap_obj);
-  defineVar(install("pagesize"), ScalarReal((double)sSysInfo.dwPageSize),mmap_obj);
-  defineVar(install("handle"), ScalarInteger((int)hMap),mmap_obj);
-  defineVar(install("dim"), R_NilValue ,mmap_obj);
-  UNPROTECT(1);
+  defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue), mmap_obj);
+  defineVar(install("pageoff"), _pageoff, mmap_obj);
+  defineVar(install("bytes"), _len, mmap_obj);
+  defineVar(install("filedesc"), PROTECT(ScalarInteger((int)(intptr_t)hFile)), mmap_obj);
+  defineVar(install("storage.mode"), _type, mmap_obj);
+  defineVar(install("handle"), PROTECT(ScalarInteger((int)(intptr_t)hMap)), mmap_obj);
+  defineVar(install("flags"), _flags, mmap_obj);
+  defineVar(install("dim"), R_NilValue, mmap_obj);
+  UNPROTECT(3);
   return(mmap_obj);
 }
 #else
-SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
-                SEXP _flags, SEXP _len, SEXP _off, SEXP _pageoff) {
+SEXP mmap_madvise (SEXP, SEXP, SEXP);
+
+SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _sharename, SEXP _prot,
+                SEXP _flags, SEXP _oflag, SEXP _pmode, SEXP _advice,
+                SEXP _len, SEXP _off, SEXP _pageoff) {
   int fd;
-  char *data;
+  unsigned char *data;
   struct stat st;
-
-  stat(CHAR(STRING_ELT(_fildesc,0)), &st);
-  fd = open(CHAR(STRING_ELT(_fildesc,0)), O_RDWR);
-  if(fd < 0)
-    error("unable to open file");
-  data = mmap((caddr_t)0, 
-              (size_t)REAL(_len)[0], 
-              INTEGER(_prot)[0], 
-              INTEGER(_flags)[0], 
-              fd, 
-              INTEGER(_off)[0]);
-
-  if(data == MAP_FAILED)
-    error("unable to mmap file");
+  
+  assert(asReal(_pageoff) <= INT_MAX_VALUE);
+  if(asReal(_len) + asInteger(_pageoff) > SIZE_MAX)
+    error("unable to mmap file: Requested length is too high.");
+  
+  if(xlength(_fildesc) != 0 && xlength(_sharename) != 0) {
+    error("unable to mmap file: File name and share name were both given.");
+  } else if(xlength(_fildesc) != 0) {
+    fd = open(CHAR(asChar(_fildesc)), asInteger(_oflag), (mode_t)asInteger(_pmode));
+    if(fd < 0)
+      rperror("unable to open file: %s");
+  } else if(xlength(_sharename) != 0) {
+    fd = shm_open(CHAR(asChar(_sharename)), asInteger(_oflag), (mode_t)asInteger(_pmode));
+    if(fd < 0)
+      rperror("unable to open file: %s");
+  } else {
+    if(xlength(_oflag) != 0)
+      error("unable to mmap file: oflag was given but neither file name nor share name were given.");
+    if(xlength(_pmode) != 0)
+      error("unable to mmap file: pmode was given but neither file name nor share name were given.");
+    fd = -1;
+  }
+  
+  // Lengthen file if necessary.
+  if(fd >= 0) {
+    fstat(fd, &st);
+    if((off_t)asReal(_len) > st.st_size)
+      if(!!ftruncate(fd, (off_t)asReal(_len)))
+        rperror("unable to mmap file: %s");
+  }
+  
+  data = mmap((caddr_t)0,
+              (size_t)(asReal(_len) + asInteger(_pageoff)),
+              asInteger(_prot),
+              asInteger(_flags),
+              fd,
+              (off_t)asReal(_off));
+  if(data == MAP_FAILED) {
+    close(fd);
+    rperror("unable to mmap file: %s");
+  }
+  
   data = data + asInteger(_pageoff); /* advance ptr to byte offset from page boundary */
   
   SEXP mmap_obj;
@@ -316,100 +961,516 @@ SEXP mmap_mmap (SEXP _type, SEXP _fildesc, SEXP _prot,
   SET_ENCLOS(mmap_obj, R_NilValue);
   SET_HASHTAB(mmap_obj, R_NilValue);
   SET_ATTRIB(mmap_obj, R_NilValue);
-  defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue),mmap_obj);
-  //defineVar(install("bytes"), ScalarReal(asReal(_len)-asInteger(_off)-asInteger(_pageoff)),mmap_obj);
-  defineVar(install("bytes"), _len,mmap_obj);
-  defineVar(install("filedesc"), ScalarInteger(fd),mmap_obj);
-  defineVar(install("storage.mode"), _type,mmap_obj);
-  defineVar(install("pagesize"), ScalarReal((double)sysconf(_SC_PAGE_SIZE)),mmap_obj);
-  defineVar(install("dim"), R_NilValue ,mmap_obj);
-  UNPROTECT(1);
+  defineVar(install("data"), R_MakeExternalPtr(data, R_NilValue, R_NilValue), mmap_obj);
+  defineVar(install("pageoff"), _pageoff, mmap_obj);
+  defineVar(install("bytes"), _len, mmap_obj);
+  defineVar(install("filedesc"), PROTECT(ScalarInteger(fd)), mmap_obj);
+  defineVar(install("storage.mode"), _type, mmap_obj);
+  defineVar(install("dim"), R_NilValue, mmap_obj);
+  
+  mmap_madvise(mmap_obj, R_NilValue, _advice);
+  UNPROTECT(2);
   return(mmap_obj);
-} /*}}}*/
+}
 #endif
+/*}}}*/
 
 /* mmap_pagesize {{{ */
 #ifdef WIN32
-SEXP mmap_pagesize () {
+SEXP mmap_pagesize (void) {
   SYSTEM_INFO sSysInfo;
   GetSystemInfo(&sSysInfo);
   return ScalarInteger((int)sSysInfo.dwPageSize);
 }
+
+SEXP mmap_allocation_granularity (void) {
+  SYSTEM_INFO sSysInfo;
+  GetSystemInfo(&sSysInfo);
+  return ScalarInteger((int)sSysInfo.dwAllocationGranularity);
+}
+
+SEXP mmap_get_memlock_resource_limit (void) {
+  SIZE_T min_rss, max_rss;
+  if(!GetProcessWorkingSetSize(GetCurrentProcess(), &min_rss, &max_rss))
+    rperror("unable to query RLIMIT_MEMLOCK: %s");
+  
+  SEXP res = PROTECT(ScalarReal(min_rss));
+  setAttrib(res, install("max_rss"), PROTECT(ScalarReal(max_rss)));
+  UNPROTECT(2);
+  return res;
+}
+
+SEXP mmap_set_memlock_resource_limit (SEXP min_rss) {
+  SEXP max_rss = getAttrib(min_rss, install("max_rss"));
+  if(xlength(max_rss) == 0)
+    max_rss = min_rss;
+  if(!SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)asReal(min_rss), (SIZE_T)asReal(max_rss)))
+    rperror("unable to update RLIMIT_MEMLOCK: %s");
+  return R_NilValue;
+}
 #else
-SEXP mmap_pagesize () {
+SEXP mmap_pagesize (void) {
   return ScalarInteger((int)sysconf(_SC_PAGE_SIZE));
+}
+
+SEXP mmap_allocation_granularity (void) {
+  return mmap_pagesize();
+}
+
+SEXP mmap_get_memlock_resource_limit (void) {
+#ifdef RLIMIT_MEMLOCK
+  struct rlimit rlim;
+  if(!!getrlimit(RLIMIT_MEMLOCK, &rlim))
+    rperror("unable to query RLIMIT_MEMLOCK: %s");
+  SEXP res;
+  if(rlim.rlim_cur == RLIM_INFINITY)
+    PROTECT(res = ScalarReal(INFINITY));
+  else
+    PROTECT(res = ScalarReal(rlim.rlim_cur));
+  if(rlim.rlim_max == RLIM_INFINITY)
+    setAttrib(res, install("rlim_max"), PROTECT(ScalarReal(INFINITY)));
+  else
+    setAttrib(res, install("rlim_max"), PROTECT(ScalarReal(rlim.rlim_max)));
+  UNPROTECT(2);
+  return res;
+#endif
+  return ScalarReal(INFINITY);
+}
+
+SEXP mmap_set_memlock_resource_limit (SEXP rlim_cur) {
+#ifdef RLIMIT_MEMLOCK
+  struct rlimit rlim;
+  SEXP rlim_max = getAttrib(rlim_cur, install("rlim_max"));
+  if(xlength(rlim_max) == 0) {
+    if(!!getrlimit(RLIMIT_MEMLOCK, &rlim))
+      rperror("unable to update RLIMIT_MEMLOCK: %s");
+  } else {
+    if(asReal(rlim_max) == INFINITY)
+      rlim.rlim_max = RLIM_INFINITY;
+    else
+      rlim.rlim_max = (rlim_t)asReal(rlim_max);
+  }
+  if(asReal(rlim_cur) == INFINITY)
+    rlim.rlim_cur = RLIM_INFINITY;
+  else
+    rlim.rlim_cur = (rlim_t)asReal(rlim_cur);
+  if(!!setrlimit(RLIMIT_MEMLOCK, &rlim))
+    rperror("unable to update RLIMIT_MEMLOCK: %s");
+#endif
+  return R_NilValue;
 }
 #endif
 /*}}}*/
 
 /* mmap_is_mmapped {{{ */
 SEXP mmap_is_mmapped (SEXP mmap_obj) {
-  char *data = MMAP_DATA(mmap_obj);
-  if(data == NULL)
-    return(ScalarLogical(0));
-
-  return(ScalarLogical(1));
+  return(ScalarLogical(MMAP_DATA(mmap_obj) != NULL));
 } /*}}}*/
 
+/* mmap_msync {{{ */
 #ifdef WIN32
-/* {{{ mmap_msync */
 SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
-  char *data;
+  unsigned char *data;
   data = MMAP_DATA(mmap_obj);
-  FlushViewOfFile((void *)data, (size_t)MMAP_SIZE(mmap_obj));
-  return 0;
+  HANDLE fd = (HANDLE)MMAP_FD(mmap_obj);
+  int flags = asInteger(_flags);
+  int success;
+  
+  success = ((flags & MS_SYNC) || (flags & MS_ASYNC)) && (!(flags & MS_SYNC) || !(flags & MS_ASYNC));
+  if(!success)
+    warning("unable to msync file: Exactly one of MS_SYNC or MS_ASYNC must be set.");
+  
+  if(success && fd != INVALID_HANDLE_VALUE) {
+    success = !!FlushViewOfFile((void *)data, (SIZE_T)MMAP_SIZE(mmap_obj));
+    if(success && (flags & MS_SYNC))
+      success = !!FlushFileBuffers(fd);
+    if(!success)
+      rpwarning("unable to msync file: %s");
+  }
+  
+  if(success && fd != INVALID_HANDLE_VALUE && (MMAP_FLAGS(mmap_obj) & MAP_SHARED)) {
+    // "When modifying a file through a mapped view, the last modification
+    //  timestamp may not be updated automatically."
+    // Ideally, we would only update the modification time if the file were
+    //  dirty, but there is no easy way to check except to maintain additional
+    //  state ourselves, which is overkill for just updating the file metadata.
+    FILETIME ft;
+    SYSTEMTIME st;
+    GetSystemTime(&st);
+    if(!SystemTimeToFileTime(&st, &ft) || !SetFileTime(fd, (LPFILETIME)NULL, (LPFILETIME)NULL, &ft))
+      rpwarning("unable to msync file: %s");
+  }
+  
+  return ScalarLogical(success);
 }
 #else
 SEXP mmap_msync (SEXP mmap_obj, SEXP _flags) {
-  char *data;
+  unsigned char *data;
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
   data = MMAP_DATA(mmap_obj);
-  int ret = msync(data, MMAP_SIZE(mmap_obj), INTEGER(_flags)[0]);
-  return ScalarInteger(ret);
-}/*}}}*/
+  // "The implementation  will require that addr be a multiple of the page size"
+  int success = !msync((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff), asInteger(_flags));
+  if(!success)
+    rpwarning("unable to msync file: %s");
+  return ScalarLogical(success);
+}
 #endif
+/*}}}*/
 
-/* {{{ mmap_madvise */
-SEXP mmap_madvise (SEXP mmap_obj, SEXP _len, SEXP _flags) {
-  /* function needs to allow for data to be an offset, else
-     we can't control anything of value... */
-  char *data;
-  data = MMAP_DATA(mmap_obj);
-#ifdef HAVE_MADVISE
-  int ret = madvise(data, INTEGER(_len)[0], INTEGER(_flags)[0]);
-#else
-  int ret = -1;
-#endif
-  return ScalarInteger(ret);
-}/*}}}*/
+/* mmap_madvise {{{ */
+static inline ptrdiff_t align_down (ptrdiff_t idx, ptrdiff_t pageoff, ptrdiff_t pagesize) {
+  // If pagesize is a power of 2, the bit twiddling hack rounds down
+  //  `idx + pageoff` to the nearest multiple of pagesize without any
+  //  division operations, i.e. equivalently:
+  //    return (R_xlen_t)floor((idx + pageoff) / pagesize) * pagesize - pageoff;
+  // Note that result can be negative if `pageoff != 0` and `idx` is small.
+  // This is not a buffer overflow; we are still referencing a valid address
+  //  since we assigned `data = &mmap(...)[pageoff]` in `mmap_mmap()` and the
+  //  the left hand side of the subtraction is always non-negative since
+  //  `idx` and `pageoff` are both non-negative and `pagesize` is positive.
+  assert(idx >= 0 && pageoff >= 0);
+  assert(pagesize > 0 && (pagesize & (pagesize - 1)) == 0);
+  return ((idx + pageoff) & ~(pagesize - 1)) - pageoff;
+}
 
-/* {{{ mmap_mprotect */
-SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP prot) {
-  int i, LEN;
-  size_t ival, upper_bound;
-  char *data, *addr;
+static inline ptrdiff_t align_up (ptrdiff_t idx, ptrdiff_t pageoff, ptrdiff_t pagesize) {
+  return align_down(idx + (pagesize - 1), pageoff, pagesize);
+}
 
-  data = MMAP_DATA(mmap_obj);
-  LEN = length(index);
-
-  SEXP ret; PROTECT(ret = allocVector(INTSXP, LEN));
-  int pagesize = MMAP_PAGESIZE(mmap_obj);
+#ifdef WIN32
+SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
+  unsigned char *data;
   
-  upper_bound = (MMAP_SIZE(mmap_obj)-sizeof(int));
-  for(i=0;i<LEN;i++) {
-    ival = (INTEGER(index)[i]-1)*sizeof(int);
-    if( ival > upper_bound || ival < 0 )
-      error("'i=%i' out of bounds", i);
+  typedef struct { PVOID addr; SIZE_T size; } mem_range;
+  typedef BOOL (WINAPI *madv_willneed_fn)(HANDLE, ULONG_PTR, mem_range*, ULONG);
+  
+  HMODULE kern32 = NULL;
+  madv_willneed_fn madv_willneed = NULL;
+
+  data = MMAP_DATA(mmap_obj);
+  LEN = xlength(index);
+  
+  SEXP success;
+  
+  PROTECT(success = allocVector(LGLSXP, LEN == 0 ? 1 : LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+  
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+
+  if(asInteger(_advice) == MADV_WILLNEED) {
+    // Cannot use load-time dynamic linking because mingw may link against an
+    //  old kernel32.lib and memoryapi.h file so compilation fails.
+    // Conveniently, kernel32.dll appears to always be loaded at runtime, so we
+    //  don't have to deal with the hassle of LoadLibrary() and FreeLibrary()
+    //  and can just simply use GetModuleHandle() for run-time dynamic linking.
+    kern32 = GetModuleHandle("kernel32.dll");
+    if(kern32 == NULL)
+      rpwarning("unable to madvise file: %s");
     
-/* Rprintf("offset: %i\n",(ival/pagesize)*pagesize); */
-    addr = &(data[(int)((ival/pagesize)*pagesize)]);
-    INTEGER(ret)[i] = mprotect(addr, ((ival/pagesize)*pagesize)*2, INTEGER(prot)[0]);
+    if(kern32 != NULL) {
+      madv_willneed = (madv_willneed_fn)GetProcAddress(kern32, "PrefetchVirtualMemory");
+      if(madv_willneed == NULL)
+        rpwarning("unable to madvise file: %s");
+    }
+  } else if(asInteger(_advice) != MADV_DONTNEED) {
+    warning("unable to madvise file: This advice cannot be changed once set.");
   }
-  UNPROTECT(1);
-  return ret;
+  
+  if(madv_willneed != NULL) {
+    if(LEN == 0) {
+      LOGICAL(success)[0] = !!madv_willneed(GetCurrentProcess(), 1, &(mem_range){data, (SIZE_T)MMAP_SIZE(mmap_obj)}, 0);
+      if(!LOGICAL(success)[0])
+        rpwarning("unable to madvise file: %s");
+    }
+    
+    for(i = 0; i < LEN; i++) {
+      u = (R_xlen_t)index_p[i] - 1;
+      if(u >= mmap_len || u < 0)
+        error("'i=%i' out of bounds", u + 1);
+      
+      LOGICAL(success)[i] = !!madv_willneed(GetCurrentProcess(), 1, &(mem_range){&data[u * Cbytes], (SIZE_T)Cbytes}, 0);
+      if(!LOGICAL(success)[i])
+        rpwarning("unable to madvise file: %s");
+    }
+  } else if(asInteger(_advice) == MADV_DONTNEED) {
+    // "Calling VirtualUnlock on a range of memory that is not locked releases
+    //  the pages from the process's working set."
+    // "If any of the pages in the specified range are not locked, VirtualUnlock
+    //  removes such pages from the working set, sets last error to
+    //  ERROR_NOT_LOCKED, and returns FALSE."
+    // According to Task Manager, this indeed reduces the "working set size"
+    //  immediately just like how "the resident set size (RSS) of the calling
+    //  process will be immediately reduced" on Linux with "MADV_DONTNEED". In
+    //  other words, physical memory is freed up for other processes to use.
+    if(LEN == 0) {
+      LOGICAL(success)[0] = !!VirtualUnlock(data, (SIZE_T)MMAP_SIZE(mmap_obj)) || GetLastError() == ERROR_NOT_LOCKED;
+      if(!LOGICAL(success)[0])
+        rpwarning("unable to madvise file: %s");
+    }
+    
+    for(i = 0; i < LEN; i++) {
+      u = (R_xlen_t)index_p[i] - 1;
+      if(u >= mmap_len || u < 0)
+        error("'i=%i' out of bounds", u + 1);
+      
+      LOGICAL(success)[i] = !!VirtualUnlock(&data[u * Cbytes], (SIZE_T)Cbytes) || GetLastError() == ERROR_NOT_LOCKED;
+      if(!LOGICAL(success)[i])
+        rpwarning("unable to madvise file: %s");
+    }
+  } else {
+    if(LEN == 0)
+      LOGICAL(success)[0] = 0;
+    
+    for(i = 0; i < LEN; i++) {
+      u = (R_xlen_t)index_p[i] - 1;
+      if(u >= mmap_len || u < 0)
+        error("'i=%i' out of bounds", u + 1);
+      
+      LOGICAL(success)[i] = 0;
+    }
+  }
+  
+  UNPROTECT(2);
+  return success;
+}
+#else
+SEXP mmap_madvise (SEXP mmap_obj, SEXP index, SEXP _advice) {
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
+#ifdef HAVE_MADVISE
+  unsigned char *data;
+  R_xlen_t aligned;
+  R_xlen_t pagesize = asInteger(mmap_pagesize());
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
+  data = MMAP_DATA(mmap_obj);
+#endif
+  LEN = xlength(index);
+
+  SEXP success;
+  
+  if(LEN == 0) {
+#ifdef HAVE_MADVISE
+    // Note: MADV_DONTNEED is kind of dangerous since it's destructive on some
+    //  POSIX implementations. On Linux: "If the pages are dirty, it's OK to
+    //  just throw them away. [...] An interface that causes the system to free
+    //  clean pages and flush dirty pages is already available as
+    //  msync(MS_INVALIDATE)."
+    // This warning should definitely show up in the R documentation and should
+    //  advise the user to call `msync(MS_SYNC)` before using `MADV_DONTNEED`.
+    if(!madvise((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff), asInteger(_advice)))
+      return ScalarLogical(1);
+    rpwarning("unable to madvise file: %s");
+#else
+    warning("unable to madvise file: This advice cannot be changed once set.");
+#endif
+    return ScalarLogical(0);
+  }
+  
+  PROTECT(success = allocVector(LGLSXP, LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+  
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  for(i = 0; i < LEN; i++) {
+    u = (R_xlen_t)index_p[i] - 1;
+    if(u >= mmap_len || u < 0)
+      error("'i=%i' out of bounds", u + 1);
+    
+#ifdef HAVE_MADVISE
+    // "The Linux implementation requires that the address addr be page-aligned"
+    aligned = align_down(u * Cbytes, pageoff, pagesize);
+    LOGICAL(success)[i] = !madvise(&data[aligned], (size_t)((u + 1) * Cbytes - aligned), asInteger(_advice));
+    if(!LOGICAL(success)[i])
+      rpwarning("unable to madvise file: %s");
+#else
+    LOGICAL(success)[i] = 0;
+    warning("unable to madvise file: This advice cannot be changed once set.");
+#endif
+  }
+  
+  UNPROTECT(2);
+  return success;
+}
+#endif
+/*}}}*/
+
+/* mmap_mprotect {{{ */
+SEXP mmap_mprotect (SEXP mmap_obj, SEXP index, SEXP _prot) {
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
+  unsigned char *data;
+  
+#ifndef WIN32
+  R_xlen_t aligned;
+  R_xlen_t pagesize = asInteger(mmap_pagesize());
+  int prot = asInteger(_prot);
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
+#else
+  DWORD old_prot;
+  DWORD prot = translate_prot_and_flags(asInteger(_prot), MMAP_FLAGS(mmap_obj));
+#endif
+  
+  data = MMAP_DATA(mmap_obj);
+  LEN = xlength(index);
+
+  SEXP success;
+  
+  if(LEN == 0) {
+#ifndef WIN32
+    if(!mprotect((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff), prot))
+      return ScalarLogical(1);
+#else
+    if(VirtualProtect(data, (SIZE_T)MMAP_SIZE(mmap_obj), prot, &old_prot))
+      return ScalarLogical(1);
+#endif
+    rpwarning("unable to mprotect file: %s");
+    return ScalarLogical(0);
+  }
+  
+  PROTECT(success = allocVector(LGLSXP, LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  for(i = 0; i < LEN; i++) {
+    u = (R_xlen_t)index_p[i] - 1;
+    if(u >= mmap_len || u < 0)
+      error("'i=%i' out of bounds", u + 1);
+    
+#ifndef WIN32
+    // "addr must be aligned to a page boundary."
+    aligned = align_down(u * Cbytes, pageoff, pagesize);
+    LOGICAL(success)[i] = !mprotect(&data[aligned], (size_t)((u + 1) * Cbytes - aligned), prot);
+#else
+    LOGICAL(success)[i] = !!VirtualProtect(&data[u * Cbytes], (SIZE_T)Cbytes, prot, &old_prot);
+#endif
+    if(!LOGICAL(success)[i])
+      rpwarning("unable to mprotect file: %s");
+  }
+  
+  UNPROTECT(2);
+  return success;
 }/*}}}*/
 
-void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+/* mmap_mlock {{{ */
+SEXP mmap_mlock (SEXP mmap_obj, SEXP index) {
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
+  unsigned char *data;
+  
+#ifndef WIN32
+  R_xlen_t aligned;
+  R_xlen_t pagesize = asInteger(mmap_pagesize());
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
+#endif
+  
+  data = MMAP_DATA(mmap_obj);
+  LEN = xlength(index);
+
+  SEXP success;
+  
+  if(LEN == 0) {
+#ifndef WIN32
+    if(!mlock((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff)))
+      return ScalarLogical(1);
+#else
+    if(VirtualLock(data, (SIZE_T)MMAP_SIZE(mmap_obj)))
+      return ScalarLogical(1);
+#endif
+    rpwarning("unable to mlock file: %s");
+    return ScalarLogical(0);
+  }
+  
+  PROTECT(success = allocVector(LGLSXP, LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  for(i = 0; i < LEN; i++) {
+    u = (R_xlen_t)index_p[i] - 1;
+    if(u >= mmap_len || u < 0)
+      error("'i=%i' out of bounds", u + 1);
+    
+#ifndef WIN32
+    // "The implementation may require that addr be a multiple of {PAGESIZE}."
+    aligned = align_down(u * Cbytes, pageoff, pagesize);
+    LOGICAL(success)[i] = !mlock(&data[aligned], (size_t)((u + 1) * Cbytes - aligned));
+#else
+    LOGICAL(success)[i] = !!VirtualLock(&data[u * Cbytes], (SIZE_T)Cbytes);
+#endif
+    if(!LOGICAL(success)[i])
+      rpwarning("unable to mlock file: %s");
+  }
+  
+  UNPROTECT(2);
+  return success;
+}/*}}}*/
+
+/* mmap_munlock {{{ */
+SEXP mmap_munlock (SEXP mmap_obj, SEXP index) {
+  R_xlen_t i, LEN;
+  R_xlen_t u, mmap_len, Cbytes;
+  unsigned char *data;
+  
+#ifndef WIN32
+  R_xlen_t aligned;
+  R_xlen_t pagesize = asInteger(mmap_pagesize());
+  R_xlen_t pageoff = MMAP_PAGEOFF(mmap_obj);
+#endif
+  
+  data = MMAP_DATA(mmap_obj);
+  LEN = xlength(index);
+
+  SEXP success;
+  
+  if(LEN == 0) {
+#ifndef WIN32
+    if(!munlock((unsigned char *)(data - pageoff), (size_t)(MMAP_SIZE(mmap_obj) + pageoff)))
+      return ScalarLogical(1);
+#else
+    if(VirtualUnlock(data, (SIZE_T)MMAP_SIZE(mmap_obj)))
+      return ScalarLogical(1);
+#endif
+    rpwarning("unable to munlock file: %s");
+    return ScalarLogical(0);
+  }
+  
+  PROTECT(success = allocVector(LGLSXP, LEN));
+  PROTECT(index = coerceVector(index, REALSXP));
+  double *index_p = REAL(index);
+
+  Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  for(i = 0; i < LEN; i++) {
+    u = (R_xlen_t)index_p[i] - 1;
+    if(u >= mmap_len || u < 0)
+      error("'i=%i' out of bounds", u + 1);
+    
+#ifndef WIN32
+    // "The implementation may require that addr be a multiple of {PAGESIZE}."
+    aligned = align_down(u * Cbytes, pageoff, pagesize);
+    LOGICAL(success)[i] = !munlock(&data[aligned], (size_t)((u + 1) * Cbytes - aligned));
+#else
+    LOGICAL(success)[i] = !!VirtualUnlock(&data[u * Cbytes], (SIZE_T)Cbytes);
+#endif
+    if(!LOGICAL(success)[i])
+      rpwarning("unable to munlock file: %s");
+  }
+  
+  UNPROTECT(2);
+  return success;
+}/*}}}*/
+
+/* mmap_extract {{{ */
+static void logical_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   int *lgl_dat;
   int8_t bytebuf;
   int32_t intbuf;
@@ -418,7 +1479,7 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   lgl_dat = LOGICAL(dat);
   if(strcmp(SMODE_CTYPE(smode), "bitset") == 0) { /* bitset */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       // Note that we can store 32 values in each word.
       if(u >= mmap_len * 32 || u < 0)
         error("'i=%i' out of bounds", u + 1);
@@ -436,7 +1497,7 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
     switch(SMODE_CBYTES(smode)) {
     case 1: /* bool8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -449,7 +1510,7 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
       break;
     case 4: /* bool32 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -467,8 +1528,8 @@ void logical_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   }
 }
 
-void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+static void integer_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   int *int_dat;
   int8_t bytebuf;
   int16_t sbuf;
@@ -479,7 +1540,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   case 1:
     if(SMODE_SIGNED(smode)) { /* int8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -491,7 +1552,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
       }
     } else { /* uint8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -506,7 +1567,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   case 2:
     if(SMODE_SIGNED(smode)) { /* int16 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -520,7 +1581,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
       }
     } else { /* uint16 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -536,7 +1597,7 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
     break;
   case 4: /* int32 */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -553,8 +1614,8 @@ void integer_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   }
 }
 
-void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+static void double_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   double *real_dat;
   int64_t longbuf;
   float floatbuf;
@@ -564,7 +1625,7 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
   switch(SMODE_CBYTES(smode)) {
   case 4: /* real32 */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -581,7 +1642,7 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
     if(strcmp(SMODE_CTYPE(smode), "int64") == 0) { /* int64 */
       /* casting from int64 to R double to minimize precision loss */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -595,7 +1656,7 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
       }
     } else { /* real64 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -612,15 +1673,15 @@ void double_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mm
   }
 }
 
-void complex_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, int swap) {
-  int i, u;
+static void complex_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, int swap) {
+  R_xlen_t i, u;
   Rcomplex *complex_dat;
   double doublepairbuf[2];
   Rcomplex Rcomplexbuf;
   
   complex_dat = COMPLEX(dat);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -646,15 +1707,14 @@ void complex_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int m
   }
 }
 
-void character_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode) {
-  int i, u, fieldCbytes, hasnul;
+static void character_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode) {
+  R_xlen_t i, u, fieldCbytes;
   char *str;
   
   fieldCbytes = SMODE_CBYTES(smode);
-  hasnul = !!SMODE_NUL_TERM(smode);
-  if(hasnul) {
+  if(SMODE_NUL_TERM(smode)) {
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -666,7 +1726,7 @@ void character_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int
     }
   } else {  /* nul-padded char array */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -679,13 +1739,13 @@ void character_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int
   }
 }
 
-void raw_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_len, int record_size, int offset) {
-  int i, u;
+static void raw_extract (unsigned char *data, SEXP dat, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset) {
+  R_xlen_t i, u;
   Rbyte *raw_dat;
 
   raw_dat = RAW(dat);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -693,20 +1753,18 @@ void raw_extract(unsigned char *data, SEXP dat, int LEN, int *index_p, int mmap_
   }
 }
 
-/* {{{ mmap_extract */
 SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_byte_order) {
-/*SEXP mmap_extract (SEXP index, SEXP field, SEXP mmap_obj) {*/
-  long v, fi;
+  R_xlen_t v, fi;
   int P = 0;
-  unsigned char *data; /* unsigned int and values */
+  unsigned char *data;
 
-  PROTECT(index = coerceVector(index, INTSXP)); P++;
-  PROTECT(field = coerceVector(field, INTSXP)); P++;
+  PROTECT(index = coerceVector(index, REALSXP)); P++;
+  PROTECT(field = coerceVector(field, REALSXP)); P++;
   SEXP vec_smode, smode = MMAP_SMODE(mmap_obj);
-  int LEN = length(index);
-  int mode = TYPEOF(smode);
-  int Cbytes = SMODE_CBYTES(smode);
-  int mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  R_xlen_t LEN = xlength(index);
+  SEXPTYPE mode = TYPEOF(smode);
+  R_xlen_t Cbytes = SMODE_CBYTES(smode);
+  R_xlen_t mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
 
   data = MMAP_DATA(mmap_obj);
   if(data == NULL)
@@ -714,14 +1772,14 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
 
   SEXP dat; /* dat is either a column, or list of columns */
   if(mode == VECSXP)
-    PROTECT(dat = allocVector(VECSXP, length(field)));
+    PROTECT(dat = allocVector(VECSXP, xlength(field)));
   else
     PROTECT(dat = allocVector(mode, LEN));
   P++;
 
-  int *index_p = INTEGER(index);
+  double *index_p = REAL(index);
 
-  int offset;
+  R_xlen_t offset;
   SEXP vec_dat;
 
   switch(mode) {
@@ -744,8 +1802,8 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
     raw_extract(data, dat, LEN, index_p, mmap_len, Cbytes, 0);
     break; /* }}} */
   case VECSXP:  /* corresponds to C struct for mmap package {{{ */
-    for(fi = 0; fi < length(field); fi++) {
-      v = INTEGER(field)[fi] - 1;
+    for(fi = 0; fi < xlength(field); fi++) {
+      v = (R_xlen_t)REAL(field)[fi] - 1;
       offset = SMODE_OFFSET(smode, v);
       vec_smode = VECTOR_ELT(smode, v);
       switch(TYPEOF(vec_smode)) {
@@ -801,8 +1859,9 @@ SEXP mmap_extract (SEXP index, SEXP field, SEXP dim, SEXP mmap_obj, SEXP swap_by
   return dat;
 }/*}}}*/
 
-void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+/* mmap_replace {{{ */
+static void logical_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   int *lgl_value;
   int32_t intbuf;
   div_t word;
@@ -810,7 +1869,7 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   lgl_value = LOGICAL(value);
   if(strcmp(SMODE_CTYPE(smode), "bitset") == 0) {  /* bitset */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       // Note that we can store 32 values in each word.
       if(u >= mmap_len * 32 || u < 0)
         error("'i=%i' out of bounds", u + 1);
@@ -838,7 +1897,7 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
     switch(SMODE_CBYTES(smode)) {
     case 1: /* bool8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -867,7 +1926,7 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
       break;
     case 4: /* bool32 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -885,8 +1944,8 @@ void logical_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   }
 }
 
-void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+static void integer_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   int *int_value;
   int16_t sbuf;
   int32_t intbuf;
@@ -896,7 +1955,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   case 1:
     if(SMODE_SIGNED(smode)) { /* int8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -914,7 +1973,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
       }
     } else { /* uint8 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -935,7 +1994,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   case 2:
     if(SMODE_SIGNED(smode)) { /* int16 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -956,7 +2015,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
       }
     } else { /* uint16 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -979,7 +2038,7 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
     break;
   case 4: /* int32 */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -996,8 +2055,8 @@ void integer_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   }
 }
 
-void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode, int swap) {
-  int i, u;
+static void double_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode, int swap) {
+  R_xlen_t i, u;
   double *real_value;
   int64_t longbuf;
   float floatbuf;
@@ -1007,7 +2066,7 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
   switch(SMODE_CBYTES(smode)) {
   case 4: /* real32 */
     for(i = 0; i < LEN; i++) {
-      u = index_p[i] - 1;
+      u = (R_xlen_t)index_p[i] - 1;
       if(u >= mmap_len || u < 0)
         error("'i=%i' out of bounds", u + 1);
       
@@ -1025,7 +2084,7 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
   case 8:
     if(strcmp(SMODE_CTYPE(smode), "int64") == 0) { /* int64 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -1057,7 +2116,7 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
       }
     } else { /* real64 */
       for(i = 0; i < LEN; i++) {
-        u = index_p[i] - 1;
+        u = (R_xlen_t)index_p[i] - 1;
         if(u >= mmap_len || u < 0)
           error("'i=%i' out of bounds", u + 1);
         
@@ -1072,15 +2131,15 @@ void double_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int 
   }
 }
 
-void complex_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, int swap) {
-  int i, u;
+static void complex_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, int swap) {
+  R_xlen_t i, u;
   Rcomplex *complex_value;
   double doublepairbuf[2];
   Rcomplex Rcomplexbuf;
   
   complex_value = COMPLEX(value);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -1095,13 +2154,15 @@ void complex_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int
   }
 }
 
-void character_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset, SEXP smode) {
-  int i, u, fieldCbytes, hasnul, charsxp_len;
+static void character_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset, SEXP smode) {
+  R_xlen_t i, u, fieldCbytes;
+  R_len_t charsxp_len;
+  int hasnul;
   
   fieldCbytes = SMODE_CBYTES(smode);
   hasnul = !!SMODE_NUL_TERM(smode);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -1109,26 +2170,26 @@ void character_replace(unsigned char *data, SEXP value, int LEN, int *index_p, i
     // strnlen(CHAR(STRING_ELT(value, i)), fieldCbytes) is definitely O(n).
     // I'm hoping that R internally stores the length of strings
     //  so that length(CHARSXP) is O(1).
-    charsxp_len = length(STRING_ELT(value,i));
+    charsxp_len = length(STRING_ELT(value, i));
     if(STRING_ELT(value, i) == NA_STRING) {
       // Strings that start with { 0x00, 0xff } represent NA.
       data[u * record_size + offset + 1] = 0xff;
     } else if(charsxp_len > fieldCbytes - hasnul) {
       warning("Long strings were truncated");
-      memcpy(&data[u * record_size + offset], CHAR(STRING_ELT(value,i)), fieldCbytes - hasnul);
+      memcpy(&data[u * record_size + offset], CHAR(STRING_ELT(value, i)), fieldCbytes - hasnul);
     } else {
-      memcpy(&data[u * record_size + offset], CHAR(STRING_ELT(value,i)), charsxp_len);
+      memcpy(&data[u * record_size + offset], CHAR(STRING_ELT(value, i)), charsxp_len);
     }
   }
 }
 
-void raw_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mmap_len, int record_size, int offset) {
-  int i, u;
+static void raw_replace (unsigned char *data, SEXP value, R_xlen_t LEN, double *index_p, R_xlen_t mmap_len, R_xlen_t record_size, R_xlen_t offset) {
+  R_xlen_t i, u;
   Rbyte *raw_value;
   
   raw_value = RAW(value);
   for(i = 0; i < LEN; i++) {
-    u = index_p[i] - 1;
+    u = (R_xlen_t)index_p[i] - 1;
     if(u >= mmap_len || u < 0)
       error("'i=%i' out of bounds", u + 1);
     
@@ -1136,15 +2197,14 @@ void raw_replace(unsigned char *data, SEXP value, int LEN, int *index_p, int mma
   }
 }
 
-/* mmap_replace {{{ */
 SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_byte_order) {
-  int v, fi, offset;
+  R_xlen_t v, fi, offset;
   unsigned char *data;
-  int LEN = length(index);
+  R_xlen_t LEN = xlength(index);
   SEXP vec_smode, smode = MMAP_SMODE(mmap_obj);
-  int mode = TYPEOF(smode);
-  int Cbytes = SMODE_CBYTES(smode);
-  int mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
+  SEXPTYPE mode = TYPEOF(smode);
+  R_xlen_t Cbytes = SMODE_CBYTES(smode);
+  R_xlen_t mmap_len = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
   int P = 0;
   SEXP vec_value;
   
@@ -1154,13 +2214,13 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
 
   if(mode != VECSXP) {
     PROTECT(value = coerceVector(value, mode)); P++;
-    if (length(value) != LEN)
+    if(xlength(value) != LEN)
       // Code on R side failed to properly handle the recycling.
       error("size of struct and size of replacement value do not match");
   }
-  PROTECT(index = coerceVector(index, INTSXP)); P++;
-  PROTECT(field = coerceVector(field, INTSXP)); P++;
-  int *index_p = INTEGER(index);
+  PROTECT(index = coerceVector(index, REALSXP)); P++;
+  PROTECT(field = coerceVector(field, REALSXP)); P++;
+  double *index_p = REAL(index);
   switch(mode) {
   case LGLSXP:
     logical_replace(data, value, LEN, index_p, mmap_len, Cbytes, 0, smode, asLogical(swap_byte_order));
@@ -1181,15 +2241,15 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
     raw_replace(data, value, LEN, index_p, mmap_len, Cbytes, 0);
     break;
   case VECSXP: /* aka "struct"{{{ */
-    if(length(value) != length(field))
+    if(xlength(value) != xlength(field))
       // Code on R side failed to properly handle the recycling.
       error("size of struct and size of replacement value do not match");
-    for(fi = 0; fi < length(field); fi++) {
-      v = INTEGER(field)[fi] - 1;
+    for(fi = 0; fi < xlength(field); fi++) {
+      v = (R_xlen_t)REAL(field)[fi] - 1;
       offset = SMODE_OFFSET(smode, v);
       vec_smode = VECTOR_ELT(smode, v);
       vec_value = VECTOR_ELT(value, fi);
-      if (length(vec_value) != LEN)
+      if(xlength(vec_value) != LEN)
         // Code on R side failed to properly handle the recycling.
         error("size of struct and size of replacement value do not match");
       switch(TYPEOF(vec_smode)) {
@@ -1237,10 +2297,10 @@ SEXP mmap_replace (SEXP index, SEXP field, SEXP value, SEXP mmap_obj, SEXP swap_
   return R_NilValue;
 } /*}}}*/
 
-/* {{{ mmap_compare */
+/* mmap_compare {{{ */
 SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
-  int i;
-  char *data;
+  R_xlen_t i;
+  unsigned char *data;
 
   unsigned char charbuf;
   int intbuf;
@@ -1248,13 +2308,13 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
   float floatbuf;
   double realbuf;
 
-  long LEN;
-  int mode = TYPEOF(MMAP_SMODE(mmap_obj)); 
-  int Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
+  R_xlen_t LEN;
+  SEXPTYPE mode = TYPEOF(MMAP_SMODE(mmap_obj));
+  R_xlen_t Cbytes = SMODE_CBYTES(MMAP_SMODE(mmap_obj));
   int isSigned = SMODE_SIGNED(MMAP_SMODE(mmap_obj));
 
   SEXP result;
-  LEN = (long)(MMAP_SIZE(mmap_obj)/Cbytes);  /* change to REAL */
+  LEN = MMAP_SIZE(mmap_obj) / Cbytes; /* length.mmap() */
   PROTECT(result = allocVector(INTSXP, LEN));
   int *int_result = INTEGER(result);
 
@@ -1265,7 +2325,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
      4  <=
      5  >
      6  < */
-  int cmp_how = INTEGER(compare_how)[0];
+  int cmp_how = asInteger(compare_how);
 
   //int *int_dat;
   //double *real_dat;
@@ -1282,7 +2342,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
 
   switch(mode) {
   case LGLSXP:
-    cmp_to_int = INTEGER(coerceVector(compare_to,INTSXP))[0];
+    cmp_to_int = asInteger(compare_to);
     /* bitset, bool8, bool32 */
     switch(Cbytes) {
       case sizeof(char):
@@ -1333,14 +2393,14 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
         if(cmp_how==1) {
           for(i=0;  i < LEN; i++) {
             memcpy(&intbuf, &(data[i * sizeof(int)]), sizeof(char) * sizeof(int));
-            if(cmp_to_int == intbuf) 
+            if(cmp_to_int == intbuf)
               int_result[hits++] = i+1;
           }
         } else
         if(cmp_how==2) {
           for(i=0;  i < LEN; i++) {
             memcpy(&intbuf, &(data[i * sizeof(int)]), sizeof(char) * sizeof(int));
-            if(cmp_to_int != intbuf) 
+            if(cmp_to_int != intbuf)
               int_result[hits++] = i+1;
           }
         } else
@@ -1379,9 +2439,9 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     }
     break;
   case INTSXP:
-    cmp_to_int = INTEGER(coerceVector(compare_to,INTSXP))[0];
+    cmp_to_int = asInteger(compare_to);
     /* needs to branch for
-        uint8, int8, uint16, int16, uint24, int24, int32 
+        uint8, int8, uint16, int16, uint24, int24, int32
         FIXME int64 (in REALSXP branch)
     */
     switch(Cbytes) {
@@ -1480,7 +2540,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
         cmp_to_int = (short)cmp_to_int;
         for(i=0;  i < LEN; i++) {
           memcpy(&shortbuf, &(data[i * sizeof(short)]),sizeof(short));
-          //if(cmp_to_int == (int)(short)*(short *)(short_buf)) 
+          //if(cmp_to_int == (int)(short)*(short *)(short_buf))
           if(cmp_to_int == shortbuf)
             int_result[hits++] = i+1;
         }
@@ -1569,15 +2629,15 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
       if(cmp_how==1) {
         for(i=0;  i < LEN; i++) {
           memcpy(&intbuf, &(data[i * sizeof(int)]), sizeof(char) * sizeof(int));
-          //if(cmp_to_int == *((int *)(void *)&int_buf)) 
-          if(cmp_to_int == intbuf) 
+          //if(cmp_to_int == *((int *)(void *)&int_buf))
+          if(cmp_to_int == intbuf)
             int_result[hits++] = i+1;
         }
       } else
       if(cmp_how==2) {
         for(i=0;  i < LEN; i++) {
           memcpy(&intbuf, &(data[i * sizeof(int)]), sizeof(char) * sizeof(int));
-          if(cmp_to_int != intbuf) //*((int *)(void *)&int_buf)) 
+          if(cmp_to_int != intbuf) //*((int *)(void *)&int_buf))
             int_result[hits++] = i+1;
         }
       } else
@@ -1615,11 +2675,11 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     }
     break;
   case REALSXP:
-    /* NA handling is missing .. how is this to behave? 
+    /* NA handling is missing .. how is this to behave?
        Likely should test for compare_to as well as on-disk
        values.
     */
-    cmp_to_real = REAL(coerceVector(compare_to,REALSXP))[0];
+    cmp_to_real = asReal(compare_to);
     switch(Cbytes) {
     case sizeof(float):
       if(cmp_how==1) {
@@ -1721,7 +2781,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     break;
   case RAWSXP:
     for(i=0;  i < LEN; i++) {
-      warning("unimplemented raw comparisons"); 
+      warning("unimplemented raw comparisons");
     }
     break;
   case STRSXP: /* {{{ */
@@ -1729,9 +2789,9 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     /* fixed width character support */
     /*
     if(length(compare_to) > isNull(getAttrib(MMAP_SMODE(mmap_obj),install("nul"))) ? Cbytes-1 : Cbytes) {
-      if(isNull(getAttrib(compare_how, install("partial")))) { 
+      if(isNull(getAttrib(compare_how, install("partial")))) {
         UNPROTECT(1); return allocVector(INTSXP,0);
-      }  
+      }
       warning("only first %i characters of string compared", Cbytes-1);
     }
     */
@@ -1743,7 +2803,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
     int hasnul = !!SMODE_NUL_TERM(MMAP_SMODE(mmap_obj));
     if(hasnul) {
       for(i=0; i < LEN; i++) {
-        str = &(data[i*Cbytes]);
+        str = (char *)&(data[i*Cbytes]);
         //strncpy(str_buf, str, Cbytes);
         //str_len = strlen(str_buf);
         //str_len = (str_len > Cbytes) ? Cbytes : str_len;
@@ -1754,7 +2814,6 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
           int_result[hits++] = i+1;
       }
 //      for(i=0; i < LEN; i++) {
-//          //for(b=0; b < Cbytes-1; b++) {
 //          for(b=0; b < cmp_len; b++) {
 //            Rprintf("%c == %c,", cmp_to_raw[b], data[i*Cbytes+b]);
 //            if(cmp_to_raw[b] != data[i*Cbytes + b])
@@ -1766,7 +2825,7 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
 //      }
     } else {
       for(i=0; i < LEN; i++) {
-        str = &(data[i*Cbytes]);
+        str = (char *)&(data[i*Cbytes]);
         strncpy(str_buf, str, Cbytes);
         str_len = strlen(str_buf);
         str_len = (str_len > Cbytes) ? Cbytes : str_len;
@@ -1789,28 +2848,31 @@ SEXP mmap_compare (SEXP compare_to, SEXP compare_how, SEXP mmap_obj) {
   return ScalarInteger(hits);
 }/*}}}*/
 
-SEXP convert_ij_to_i (SEXP rows, SEXP i, SEXP j) {
+/* mmap_convert_ij_to_i {{{ */
+SEXP mmap_convert_ij_to_i (SEXP rows, SEXP i, SEXP j) {
   /* utility to take i,j subsets for matrix objects and
      convert to subset column-major array in memory */
-  long n=0, jj, ii, lenj=length(j), leni=length(i);
-  //int _rows = INTEGER(rows)[0];
-  long _rows = ((long)REAL(rows)[0]);
+  R_xlen_t n = 0, jj, ii, lenj = length(j), leni = length(i);
+  //int _rows = asInteger(rows);
+  R_xlen_t _rows = ((R_xlen_t)asReal(rows));
 
   SEXP newi;
-  int *_j, *_i, *_newi;
+  double *_j, *_i, *_newi;
 
-  _j = INTEGER(j);
-  _i = INTEGER(i);
+  PROTECT(i = coerceVector(i, REALSXP));
+  PROTECT(j = coerceVector(j, REALSXP));
+  _j = REAL(j);
+  _i = REAL(i);
 
-  PROTECT( newi = allocVector(INTSXP, leni * lenj));
-  _newi = INTEGER(newi); 
+  PROTECT(newi = allocVector(REALSXP, leni * lenj));
+  _newi = REAL(newi);
 
-  for(jj=0; jj<lenj; jj++) {
-    for(ii=0; ii<leni; ii++) {
+  for(jj = 0; jj < lenj; jj++) {
+    for(ii = 0; ii < leni; ii++) {
       _newi[n++] = (_j[jj] - 1) * _rows + _i[ii];
     }
   }
 
-  UNPROTECT(1);
+  UNPROTECT(3);
   return newi;
-}
+}/*}}}*/

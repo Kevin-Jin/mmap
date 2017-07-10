@@ -34,19 +34,18 @@ tail.mmap <- function(x, n=6L, ...) {
   x[(NROW(x)-n):NROW(x)]
 }
 
-str.mmap <- function (object, ...) 
-{
+str.mmap <- function(object, ...) {
     print(object)
-    cat("  data         :") 
+    cat("  data         :")
     str(object$data)
+    cat("  pageoff      :")
+    str(object$pageoff)
     cat("  bytes        :")
     str(object$bytes)
     cat("  filedesc     :")
     str(object$filedesc)
-    cat("  storage.mode :") 
+    cat("  storage.mode :")
     str(object$storage.mode)
-    cat("  pagesize     :")
-    str(object$pagesize)
     cat("  dim          :")
     print(object$dim)
 }
@@ -56,8 +55,9 @@ summary.mmap <- function(object) { str(object) }
 print.mmap <- function(x, ...) {
   stopifnot(is.mmap(x))
   file_name <- names(x$filedesc)
-  if(nchar(file_name) > 10)
+  if(!is.null(file_name) && nchar(file_name) > 10)
     file_name <- paste(substring(file_name,0,10),"...",sep="")
+  file_name <- paste("(", attr(x$filedesc, "backedby"), ")", file_name, sep = "")
   type_name <- switch(typeof(x$storage.mode),
                       "list"="struct",
                       "integer"="int",
@@ -69,18 +69,18 @@ print.mmap <- function(x, ...) {
   if(type_name == "struct") {
     firstN <- x[1][[1]]
   } else {
-  firstN <- head(x)
-  firstN <- if(cumsum(nchar(firstN))[length(firstN)] > 20) {
+    firstN <- head(x)
+    firstN <- if(cumsum(nchar(firstN))[length(firstN)] > 20) {
                 firstN[1:min(3,length(x))]
               } else {
                 firstN
               }
   }
-  if( !is.null(x$dim)) { # has dim
-  cat(paste("<mmap:",file_name,">  (",get.Ctype(x$storage.mode),") ",
+  if(!is.null(x$dim)) { # has dim
+    cat(paste("<mmap:",file_name,">  (",get.Ctype(x$storage.mode),") ",
             type_name," [1:", nrow(x),", 1:", ncol(x),"]",sep=""),firstN,"...\n")
   } else {
-  cat(paste("<mmap:",file_name,">  (",get.Ctype(x$storage.mode),") ",
+    cat(paste("<mmap:",file_name,">  (",get.Ctype(x$storage.mode),") ",
             type_name," [1:", length(x),"]",sep=""),firstN,"...\n")
   }
 }
@@ -102,32 +102,52 @@ mmapFlags <- function(...) {
 }
 
 # S3 constructor
-mmap <- function(file, mode=int32(), 
+mmap <- function(mode=int32(), file=NULL, share.name=NULL,
                  extractFUN=NULL, replaceFUN=NULL,
                  prot=mmapFlags("PROT_READ","PROT_WRITE"),
-                 flags=mmapFlags("MAP_SHARED"),len,off=0L,
-                 ...) {
-    if(missing(file))
-      stop("'file' must be specified")
+                 flags=if(is.null(file) && is.null(share.name)) mmapFlags("MAP_PRIVATE", "MAP_ANONYMOUS") else mmapFlags("MAP_SHARED"),
+                 oflag=if(!is.null(file)) mmapFlags("O_RDWR") else if(!is.null(share.name)) mmapFlags("O_RDWR", "O_CREAT"),
+                 pmode=if(!is.null(file) || !is.null(share.name)) mmapFlags("S_IRWXU", "S_IRGRP", "S_IWGRP", "S_IROTH"),
+                 advice=mmapFlags("MADV_NORMAL"), len, off=0L, ...) {
     # pageoff is the offset from page boundary
     # off is the page-aligned offset
     #   e.g. off=22 would set off=0 and pageoff=22 on a system with 4096 page sizing
-    pageoff <- off %% pagesize()
+    pageoff <- off %% allocation.granularity()
     off <- off - pageoff
     if(missing(len))
-      len <- file.info(file)$size - off - pageoff
+      if(!is.null(file) && file.exists(file))
+        len <- file.info(file)$size - off - pageoff
+      else
+        stop("Length must be given if file is not given or does not exist")
     
-    mmap_obj <- .Call("mmap_mmap", 
+    # `oflag` parameter of `open()` specifies the file descriptor's permissions.
+    # `pmode` parameter of `open()` specifies the permissions of any newly
+    #  created files and is applicable only when `oflag & O_CREAT` is true.
+    # `prot` parameter of `mmap()` specifies the memory region's permissions.
+    # `flags` parameter of `mmap()` specifies the sharing semantics when other
+    #  processes map the same file, e.g. share changes or copy-on-write.
+    # `advice` parameter of `madvise()` specifies the initial usage pattern of
+    #  the memory mapping so that disk access can be optimized.
+    mmap_obj <- .Call("mmap_mmap",
                       as.Ctype(mode),
                       file,
-                      as.integer(prot), 
-                      as.integer(flags), 
+                      share.name,
+                      as.integer(prot),
+                      as.integer(flags),
+                      as.integer(oflag),
+                      as.integer(pmode),
+                      as.integer(advice),
                       as.double(len),
-                      as.integer(off),
+                      as.double(off),
                       as.integer(pageoff),
                       PKG="mmap")
     reg.finalizer(mmap_obj, mmap_finalizer, TRUE)
-    mmap_obj$filedesc <- structure(mmap_obj$filedesc, .Names=file)
+    if(!is.null(file))
+      mmap_obj$filedesc <- structure(mmap_obj$filedesc, .Names=file, backedby="file")
+    else if(!is.null(share.name))
+      mmap_obj$filedesc <- structure(mmap_obj$filedesc, .Names=share.name, backedby="shared")
+    else
+      mmap_obj$filedesc <- structure(mmap_obj$filedesc, backedby="anon")
     mmap_obj$extractFUN <- extractFUN
     mmap_obj$replaceFUN <- replaceFUN
     class(mmap_obj) <- "mmap"
@@ -152,12 +172,41 @@ msync <- function(x, flags=mmapFlags("MS_ASYNC")) {
   .Call("mmap_msync", x, as.integer(flags), PKG="mmap")
 }
 
-mprotect <- function(x, i, prot) {
-  # i indicates the start and length of protection
+madvise <- function(x, i = NULL, advice) {
+  if(!is.mmap(x))
+    stop("mmap object required to madvise")
+  .Call("mmap_madvise", x, i, as.integer(advice), PKG="mmap")
+}
 
-  # TODO: add ability to protect multiple pages in a
-  # range
-  .Call("mmap_mprotect", x, i, prot, PKG="mmap")
+mprotect <- function(x, i = NULL, prot) {
+  if(!is.mmap(x))
+    stop("mmap object required to mprotect")
+  # # Assuming i is the sequence of targeted record numbers (1-indexed):
+  # # Ranges of targeted memory offsets (relative to the address of the first page) can be found by
+  # r <- cbind((i - 1) * sizeof(x$storage.mode) + x$pageoff, i * sizeof(x$storage.mode) + x$pageoff - 1)
+  # # Ranges of affected page numbers (0-indexed) can be found by
+  # s <- floor(r / pagesize()) # round to -Inf, not round to 0!
+  # # Sequence of affected page numbers (0-indexed) can be found by
+  # u <- unique(do.call(c, as.list(apply(s, 1, function(range) range[1]:range[2]))))
+  # # Ranges of affected memory offsets (relative to the address of the first record) can be found by
+  # v <- cbind(u * pagesize() - x$pageoff, (u + 1) * pagesize() - x$pageoff - 1)
+  # # Ranges of affected record numbers (1-indexed) can be found by
+  # w <- floor(v / sizeof(x$storage.mode)) + 1 # round to -Inf, not round to 0!
+  # # Sequence of affected record numbers can be found by
+  # z <- unique(do.call(c, as.list(apply(w, 1, function(range) range[1]:range[2]))))
+  .Call("mmap_mprotect", x, i, as.integer(prot), PKG="mmap")
+}
+
+mlock <- function(x, i = NULL) {
+  if(!is.mmap(x))
+    stop("mmap object required to mlock")
+  .Call("mmap_mlock", x, i, PKG="mmap")
+}
+
+munlock <- function(x, i = NULL) {
+  if(!is.mmap(x))
+    stop("mmap object required to munlock")
+  .Call("mmap_munlock", x, i, PKG="mmap")
 }
 
 is.mmap <- function(x) {
@@ -166,7 +215,7 @@ is.mmap <- function(x) {
 
 `[.mmap` <- function(x, i, j, ...) {
   if(sizeof(x) == 0) stop('no data to extract')
-  if( is.struct(x$storage.mode) || is.null(x$dim)) {
+  if(is.struct(x$storage.mode) || is.null(x$dim)) {
     if(missing(i))
       i <- 1:length(x)
     if(missing(j))
@@ -175,31 +224,31 @@ is.mmap <- function(x) {
       j <- match(j, names(x$storage.mode))
     DIM <- NULL
   } else {
-    if( missing(i))
+    if(missing(i))
       i <- 1:dim(x)[1]
-    if( missing(j))
+    if(missing(j))
       j <- 1:dim(x)[2]
     DIM <- c(length(i),length(j))
-    i <- .Call("convert_ij_to_i", as.double(dim(x)[1]), as.integer(i), as.integer(j))
+    i <- .Call("mmap_convert_ij_to_i", dim(x)[1], i, j)
     j <- 1L
   }
   j <- j[j>0] # only positive values
   swap.byte.order <- FALSE
-  if (is.struct(x$storage.mode)) {
+  if(is.struct(x$storage.mode)) {
     swap.byte.order <- logical(length(j))
-    for (fi in 1:length(j))
-      if (!inherits(x$storage.mode[[j[fi]]], "string") && sizeof(x$storage.mode[[j[fi]]]) > 1)
+    for(fi in 1:length(j))
+      if(!inherits(x$storage.mode[[j[fi]]], "string") && sizeof(x$storage.mode[[j[fi]]]) > 1)
         swap.byte.order[fi] <- attr(x$storage.mode[[j[fi]]], "endian") != .Platform$endian
-  } else if (!inherits(x$storage.mode, "string") && sizeof(x$storage.mode) > 1) {
+  } else if(!inherits(x$storage.mode, "string") && sizeof(x$storage.mode) > 1) {
     swap.byte.order <- attr(x$storage.mode, "endian") != .Platform$endian
   }
-  xx <- .Call("mmap_extract", i, as.integer(j), DIM, x, swap.byte.order, PKG="mmap")
+  xx <- .Call("mmap_extract", i, j, DIM, x, swap.byte.order, PKG="mmap")
   names(xx) <- names(x$storage.mode)[j]
-  if (is.struct(x$storage.mode)) {
-    for (fi in 1:length(j))
-      if (inherits(x$storage.mode[[j[fi]]], "string"))
+  if(is.struct(x$storage.mode)) {
+    for(fi in 1:length(j))
+      if(inherits(x$storage.mode[[j[fi]]], "string"))
         Encoding(xx[[fi]]) <- attr(x$storage.mode[[j[fi]]], "enc")
-  } else if (inherits(x$storage.mode, "string")) {
+  } else if(inherits(x$storage.mode, "string")) {
     Encoding(xx) <- attr(x$storage.mode, "enc")
   }
   if(is.null(extractFUN(x)))
@@ -209,7 +258,7 @@ is.mmap <- function(x) {
 }
 
 normalize.encoding <- function(x, to) {
-  if (length(x) == 0)
+  if(length(x) == 0)
     return(x)
   
   original.encoding <- Encoding(x)
@@ -224,7 +273,7 @@ normalize.encoding <- function(x, to) {
   if(sizeof(x) == 0) stop('no data to extract')
   if(is.struct(x$storage.mode) && !is.list(value))
     value <- list(value)
-  if( is.struct(x$storage.mode) || is.null(x$dim)) {
+  if(is.struct(x$storage.mode) || is.null(x$dim)) {
     if(missing(i))
       i <- 1:length(x)
     if(missing(j))
@@ -242,7 +291,7 @@ normalize.encoding <- function(x, to) {
       j <- 1:dim(x)[2]
     if(is.character(j))
       j <- match(j, names(x$dimnames))
-    i <- .Call("convert_ij_to_i", as.double(dim(x)[1]), as.integer(i), as.integer(j))
+    i <- .Call("mmap_convert_ij_to_i", dim(x)[1], i, j)
     j <- 1L
     if(length(i) != length(value))
       value <- rep(value, length.out=length(i))
@@ -251,21 +300,21 @@ normalize.encoding <- function(x, to) {
   if(max(i) > length(x) || min(i) < 0)
     stop("improper 'i' range")
   swap.byte.order <- FALSE
-  if (is.struct(x$storage.mode)) {
+  if(is.struct(x$storage.mode)) {
     if(length(j) != length(value))
       value <- rep(value, length.out=length(j))
     swap.byte.order <- logical(length(j))
-    for (fi in 1:length(j))
-      if (inherits(x$storage.mode[[j[fi]]], "string"))
+    for(fi in 1:length(j))
+      if(inherits(x$storage.mode[[j[fi]]], "string"))
         value[[fi]] <- normalize.encoding(as.character(value[[fi]]), attr(x$storage.mode[[j[fi]]], "enc"))
-      else if (sizeof(x$storage.mode[[j[fi]]]) > 1)
+      else if(sizeof(x$storage.mode[[j[fi]]]) > 1)
         swap.byte.order[fi] <- attr(x$storage.mode[[j[fi]]], "endian") != .Platform$endian
-  } else if (inherits(x$storage.mode, "string")) {
+  } else if(inherits(x$storage.mode, "string")) {
     value <- normalize.encoding(as.character(value), attr(x$storage.mode, "enc"))
-  } else if (sizeof(x$storage.mode) > 1) {
+  } else if(sizeof(x$storage.mode) > 1) {
     swap.byte.order <- attr(x$storage.mode, "endian") != .Platform$endian
   }
-  .Call("mmap_replace", i, j, value, x, swap.byte.order, PKG="mmap") 
+  .Call("mmap_replace", i, j, value, x, swap.byte.order, PKG="mmap")
   if(sync)
     msync(x)
   x
@@ -274,7 +323,7 @@ normalize.encoding <- function(x, to) {
 length.mmap <- function(x) {
   size_in_bytes <- sizeof(x)
   size <- sizeof(x$storage.mode)
-  if( get.Ctype(x$storage.mode) == "bitset")
+  if(get.Ctype(x$storage.mode) == "bitset")
     trunc(size_in_bytes/size) * 32L
   else
     trunc(size_in_bytes/size)
@@ -288,7 +337,7 @@ length.mmap <- function(x) {
     stop("cannot increase an mmap file's size") # implement something automatic here
   }
   x$bytes <- as.double(size_in_bytes)
-  x 
+  x
 }
 
 
@@ -302,13 +351,13 @@ as.mmap <- function(x, mode, file,...) {
   UseMethod("as.mmap")
 }
 
-as.mmap.raw <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.raw <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   writeBin(x, file)
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.logical <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   
@@ -326,7 +375,7 @@ as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
         word <- sum(bitwShiftL(as.integer(!!x[1:31 + word.num * 32L]), 1:31 - 1), na.rm = TRUE)
         
         # `2^31` is interesting for two reasons: (1) it is R's representation
-        #  for NA_integer_, and (2) it is a negative number in 32-bit two's 
+        #  for NA_integer_, and (2) it is a negative number in 32-bit two's
         #  complement and R returns NA_integer_ upon overflow.
         # Thus, if we need to set `2^31` (the "sign bit"), we have to be clever.
         if(!x[32L + word.num * 32L]) {
@@ -376,10 +425,10 @@ as.mmap.logical <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
     writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   else
     writeBin(x, file, size=nbytes)
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.integer <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.integer <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   
@@ -408,14 +457,14 @@ as.mmap.integer <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
     writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
   else
     writeBin(x, file, size=nbytes)
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.double <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.double <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
-  result <- mmap(file, mode)
+  result <- mmap(mode, file, ...)
   
   # writeBin() simply strips NaN payloads, so we need to do some postprocessing.
   nas <- is.na(x) & !is.nan(x)
@@ -429,14 +478,14 @@ as.mmap.double <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   result
 }
 
-as.mmap.complex <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.complex <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   nbytes <- sizeof(mode)
   writeBin(x, file, size=nbytes, endian=attr(mode, "endian"))
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.character <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.character <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   mode <- as.Ctype(mode)
   payload.cap <- sizeof(mode) - 1
   
@@ -444,16 +493,16 @@ as.mmap.character <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   #  NAs in the way we want it to, so we need to do some preprocessing.
   nas <- is.na(x)
   x[!nas] <- normalize.encoding(x[!nas], attr(mode, "enc"))
-  under.over.lengths.span <- if (all(nas)) c(0, 0) else range(nchar(x[!nas], type = "bytes") - payload.cap)
-  if (under.over.lengths.span[2] > 0)
+  under.over.lengths.span <- if(all(nas)) c(0, 0) else range(nchar(x[!nas], type = "bytes") - payload.cap)
+  if(under.over.lengths.span[2] > 0)
     warning("Long strings were truncated")
-  if (any(under.over.lengths.span != 0) || any(nas)) {
+  if(any(under.over.lengths.span != 0) || any(nas)) {
     x <- lapply(x, charToRaw)
     x[!nas] <- lapply(x[!nas], function(u) {
       under.over.length <- length(u) - payload.cap
-      if (under.over.length <= 0)
+      if(under.over.length <= 0)
         c(u, raw(1 - under.over.length))
-      else if (under.over.length > 0)
+      else if(under.over.length > 0)
         c(u[1:payload.cap], raw(1))
     })
     
@@ -466,10 +515,10 @@ as.mmap.character <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
   }
   
   writeBin(x, file, useBytes=TRUE)
-  mmap(file, mode)
+  mmap(mode, file, ...)
 }
 
-as.mmap.matrix <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
+as.mmap.matrix <- function(x, mode=as.Ctype(x), file=tempmmap(), ...) {
   DIM <- dim(x)
   dim(x) <- NULL
   x <- as.mmap(x, mode, file, ...)
@@ -478,11 +527,11 @@ as.mmap.matrix <- function(x, mode=as.Ctype(x, ...), file=tempmmap(), ...) {
 }
 
 as.mmap.data.frame <- function(x, mode, file=tempmmap(), ...) {
-  if( !missing(mode))
+  if(!missing(mode))
     warning("'mode' argument currently unsupported")
-  mode <- as.Ctype(x, ...)
+  mode <- as.Ctype(x)
   writeBin(raw(sizeof(mode) * NROW(x)), file)
-  m <- mmap(file, mode, extractFUN=as.data.frame)
+  m <- mmap(mode, file, extractFUN=as.data.frame, ...)
   for(i in 1:NCOL(x)) {
     m[,i] <- x[,i]
   }
@@ -496,4 +545,16 @@ tempmmap <- function(tmpdir=tempdir()) {
 
 pagesize <- function() {
   .Call("mmap_pagesize")
+}
+
+allocation.granularity <- function() {
+  .Call("mmap_allocation_granularity")
+}
+
+get.mlock.lim <- function() {
+  .Call("mmap_get_memlock_resource_limit")
+}
+
+set.mlock.lim <- function(new.lim) {
+  invisible(.Call("mmap_set_memlock_resource_limit", new.lim))
 }

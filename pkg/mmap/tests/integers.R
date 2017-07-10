@@ -4,16 +4,16 @@ tmp <- tempfile()
 ##### int8() #####
 # write binary from min to max signed 2^8
 test.int8 <- function() {
-  writeBin(-128:127L, tmp, size=1)
+  writeBin(-127:127L, tmp, size=1)
   
-  m <- mmap(tmp, int8())  # signed 1 byte integers
-  if( !all(m[] == (-128:127L)) )
-    stop("m[] == (-128:127L)")
+  m <- mmap(int8(), tmp)  # signed 1 byte integers
+  if(!all(m[] == (-127:127L)) )
+    stop("m[] == (-127:127L)")
   
   # test replacement
-  m[] <- -128L
-  if( !all(m[] == -128))
-    stop("m[] == -128")
+  m[] <- -127L
+  if(!all(m[] == -127))
+    stop("m[] == -127")
   munmap(m)
 }
 
@@ -22,19 +22,19 @@ test.int8 <- function() {
 
 #### uint8() ####
 test.uint8 <- function(on=TRUE) {
-  if( !isTRUE(on)) {
+  if(!isTRUE(on)) {
     cat("test.uint8 disabled\n")
     return(NULL)
   }
-  writeBin(0:255L, tmp, size=1)
-  m <- mmap(tmp, uint8())  # unsigned 1 byte integers
-  if( !all(m[] == 0:255L) )
-    stop("m[] == 0:255L")
+  writeBin(0:254L, tmp, size=1)
+  m <- mmap(uint8(), tmp)  # unsigned 1 byte integers
+  if(!all(m[] == 0:254L) )
+    stop("m[] == 0:254L")
   
   # test replacement
-  m[] <- 255L;
-  if( !all(m[] == 255L))
-    stop("m[] == 255L")
+  m[] <- 254L;
+  if(!all(m[] == 254L))
+    stop("m[] == 254L")
   munmap(m)
 }
 
@@ -43,19 +43,19 @@ test.uint8 <- function(on=TRUE) {
 
 #### int16() ####
 test.int16 <- function(on=TRUE) {
-  if( !isTRUE(on)) {
+  if(!isTRUE(on)) {
     cat("test.int16 disabled\n")
     return(NULL)
   }
-  writeBin(-32768:32767L, tmp, size=2)
-  m <- mmap(tmp, int16())  # signed 2 byte integers
-  if( !all(m[] == -32768:32767L) )
-    stop("m[] == -32768:32767L")
+  writeBin(-32767:32767L, tmp, size=2)
+  m <- mmap(int16(endian="platform"), tmp)  # signed 2 byte integers
+  if(!all(m[] == -32767:32767L) )
+    stop("m[] == -32767:32767L")
   
   # test replacement
-  m[] <- -32768L
-  if( !all(m[] == -32768L))
-    stop("m[] == -32768L")
+  m[] <- -32767L
+  if(!all(m[] == -32767L))
+    stop("m[] == -32767L")
   munmap(m)
 }
 
@@ -65,19 +65,19 @@ test.int16 <- function(on=TRUE) {
 #### uint16() ####
 test.uint16 <- function(on=TRUE) {
   cat("checking test.uint16...")
-  if( !isTRUE(on)) {
+  if(!isTRUE(on)) {
     cat("test.uint16 disabled\n")
     return(NULL)
   }
-  writeBin(0:65535L, tmp, size=2)
-  m <- mmap(tmp, uint16())  # unsigned 2 byte integers
-  if( !all(m[] == 0:65535L) )
-    stop("m[] == 0:65535L")
+  writeBin(0:65534L, tmp, size=2)
+  m <- mmap(uint16(endian="platform"), tmp)  # unsigned 2 byte integers
+  if(!all(m[] == 0:65534L) )
+    stop("m[] == 0:65534L")
   
   # test replacement
-  m[] <- 65535L
-  if( !all(m[] == 65535L))
-    stop("m[] == 65535L")
+  m[] <- 65534L
+  if(!all(m[] == 65534L))
+    stop("m[] == 65534L")
   munmap(m)
   cat("OK\n")
 }
@@ -88,18 +88,18 @@ test.uint16 <- function(on=TRUE) {
 #### int32() ####
 test.int32 <- function(on=TRUE) {
   cat("checking test.int32...")
-  if( !isTRUE(on)) {
+  if(!isTRUE(on)) {
     cat("test.int32 disabled\n")
     return(NULL)
   }
   writeBin(-1e6:1e6L, tmp, size=4)
-  m <- mmap(tmp, int32())  # unsigned 2 byte integers
-  if( !all(m[] == -1e6:1e6L) )
+  m <- mmap(int32(endian="platform"), tmp)  # signed 4 byte integers
+  if(!all(m[] == -1e6:1e6L) )
     stop("m[] == -1e6:1e6L")
   
   # test replacement
   m[] <- .Machine$integer.max
-  if( !all(m[] == .Machine$integer.max))
+  if(!all(m[] == .Machine$integer.max))
     stop("m[] == .Machine$integer.max")
   munmap(m)
   cat("OK\n")
@@ -111,14 +111,14 @@ test.int32 <- function(on=TRUE) {
 #### int64() ####
 test.int64 <- function(on=TRUE) {
   cat("checking test.int64...")
-  if( !isTRUE(on)) {
+  if(!isTRUE(on)) {
     cat("test.int32 disabled\n")
     return(NULL)
   }
   writeBin(0.0, tmp)
-  m <- mmap(tmp, int64())  # signed 8 byte integers as doubles
+  m <- mmap(int64(endian="platform"), tmp)  # signed 8 byte integers as doubles
   m[] <- 2^40
-  if( !all(m[] == 2^40) )
+  if(!all(m[] == 2^40) )
     stop("m[] == 2^40")
   munmap(m)
   cat("OK\n")
